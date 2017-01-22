@@ -227,6 +227,8 @@ bool native_video_init(void *handle) {
 
     if (active_video_session) {
         debug("overlapping video session!");
+        // why abort?
+        // TODO - figure this out
         abort();
     }
 

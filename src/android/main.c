@@ -1,6 +1,9 @@
 
+#include "../debug.h"
 #include "../filesys.h"
-#include "../logging_native.h"
+#include "../settings.h"
+
+#include "../native/keyboard.h"
 
 #include <pthread.h>
 #include <stdint.h>
@@ -145,7 +148,7 @@ void openfilesend(void) { /* Unsupported on android */
 }
 void openfileavatar(void) { /* Unsupported on android */
 }
-void file_save_inline(FILE_TRANSFER *file) { /* Unsupported on android */
+void file_save_inline_image_png(MSG_HEADER *msg) { /* Unsupported on android */
 }
 void setselection(char *data, uint16_t length) { /* Unsupported on android */
 }
@@ -186,15 +189,15 @@ void *loadsavedata(uint32_t *len) {
 }
 
 void writesavedata(void *data, uint32_t len) {
-    debug("Trying to save data (android)\n");
+    LOG_TRACE("Android", "Trying to save data (android)" );
     FILE *file;
     file = fopen("/data/data/tox.utox/files/tox_save", "wb");
     if (file) {
         fwrite(data, len, 1, file);
         fclose(file);
-        debug("Saved data\n");
+        LOG_TRACE("Android", "Saved data" );
     } else {
-        debug("fopen failed\n");
+        LOG_TRACE("Android", "fopen failed" );
     }
 }
 
@@ -223,7 +226,7 @@ static void opts_to_sysmode(UTOX_FILE_OPTS opts, char *mode) {
     return;
 }
 
-FILE *native_get_file(const uint8_t *name, size_t *size, UTOX_FILE_OPTS opts) {
+FILE *native_get_file(const uint8_t *name, size_t *size, UTOX_FILE_OPTS opts, bool portable_mode) {
     uint8_t path[UTOX_FILE_NAME_LENGTH] = { 0 };
 
     snprintf(path, UTOX_FILE_NAME_LENGTH, ANDROID_INTERNAL_SAVE);
@@ -240,7 +243,7 @@ FILE *native_get_file(const uint8_t *name, size_t *size, UTOX_FILE_OPTS opts) {
     }
 
     if (strlen((char *)path) + strlen((char *)name) >= UTOX_FILE_NAME_LENGTH) {
-        debug("NATIVE:\tLoad directory name too long\n");
+        LOG_TRACE("Android Native", "Load directory name too long" );
         return NULL;
     } else {
         snprintf((char *)path + strlen((char *)path), UTOX_FILE_NAME_LENGTH - strlen((char *)path), "%s", name);
@@ -264,7 +267,7 @@ FILE *native_get_file(const uint8_t *name, size_t *size, UTOX_FILE_OPTS opts) {
     }
 
     if (fp == NULL) {
-        debug_error("NATIVE:\tCould not open %s\n", path);
+        LOG_NOTE("Android Native", "Could not open %s" , path);
         return NULL;
     }
 
@@ -275,6 +278,14 @@ FILE *native_get_file(const uint8_t *name, size_t *size, UTOX_FILE_OPTS opts) {
     }
 
     return fp;
+}
+
+bool native_move_file(const uint8_t *current_name, const uint8_t *new_name) {
+    if(!current_name || !new_name) {
+        return false;
+    }
+
+    return rename((char *)current_name, (char *)new_name);
 }
 
 void native_select_dir_ft(uint32_t fid, MSG_FILE *file) {
@@ -296,13 +307,13 @@ void native_autoselect_dir_ft(uint32_t fid, FILE_TRANSFER *file) {
     postmessage_toxcore(TOX_FILE_ACCEPT, fid, file->file_number, path); */
 }
 
-bool native_remove_file(const uint8_t *name, size_t length) {
+bool native_remove_file(const uint8_t *name, size_t length, bool portable_mode) {
     uint8_t path[UTOX_FILE_NAME_LENGTH] = { 0 };
 
     snprintf((char *)path, UTOX_FILE_NAME_LENGTH, ANDROID_INTERNAL_SAVE);
 
     if (strlen((const char *)path) + length >= UTOX_FILE_NAME_LENGTH) {
-        debug("NATIVE:\tFile/directory name too long, unable to remove\n");
+        LOG_TRACE("Android Native", "File/directory name too long, unable to remove" );
         return 0;
     } else {
         snprintf((char *)path + strlen((const char *)path), UTOX_FILE_NAME_LENGTH - strlen((const char *)path), "%.*s",
@@ -310,11 +321,11 @@ bool native_remove_file(const uint8_t *name, size_t length) {
     }
 
     if (remove((const char *)path)) {
-        debug_error("NATIVE:\tUnable to delete file!\n\t\t%s\n", path);
+        LOG_ERR("Android Native", "Unable to delete file!\n\t\t%s" , path);
         return 0;
     } else {
-        debug_info("NATIVE:\tFile deleted!\n");
-        debug("NATIVE:\t\t%s\n", path);
+        LOG_INFO("Android Native", "File deleted!" );
+        LOG_TRACE("Android Native", "\t%s" , path);
     }
     return 1;
 }
@@ -516,7 +527,7 @@ static uint32_t getkeychar(int32_t key) /* get a character from an android keyco
         MAPN(9, '(');
 
         default: {
-            debug("un-mapped %u", key);
+            LOG_TRACE("Android", "un-mapped %u", key);
             break;
         }
     }
@@ -600,7 +611,7 @@ static void utox_andoid_input(AInputQueue *in_queue, AInputEvent *event) {
                     // pointerinput2(pointer_index);
 
                     already_up = 0;
-                    debug("down %f %f, %u\n", x, y, pointer_index);
+                    LOG_TRACE("Android", "down %f %f, %u" , x, y, pointer_index);
                     p_down      = 1;
                     p_last_down = get_time();
                     break;
@@ -619,7 +630,7 @@ static void utox_andoid_input(AInputQueue *in_queue, AInputEvent *event) {
 
                     // pointerinput(pointer_index);
 
-                    debug("up %f %f, %u\n", x, y, pointer_index);
+                    LOG_TRACE("Android", "up %f %f, %u" , x, y, pointer_index);
                     p_down = 0;
                     break;
                 }
@@ -630,7 +641,7 @@ static void utox_andoid_input(AInputQueue *in_queue, AInputEvent *event) {
                         p_down = 0;
                         lx     = x;
                         ly     = y;
-                        debug("move %f %f, %u\n", x, y, pointer_index);
+                        LOG_TRACE("Android", "move %f %f, %u" , x, y, pointer_index);
                     }
                     // pointer[pointer_index].x = x;
                     // pointer[pointer_index].y = y;
@@ -671,7 +682,7 @@ static void utox_andoid_input(AInputQueue *in_queue, AInputEvent *event) {
                         uint32_t c = getkeychar(key);
                         if (c != 0) {
                             if (edit_active()) {
-                                // debug("%u\n", c);
+                                // LOG_TRACE("Android", "%u" , c);
                                 edit_char(c, 0, 0);
                             }
                             // inputchar(c);
@@ -693,20 +704,28 @@ static void android_main(struct android_app *state) {
     bool   theme_was_set_on_argv;
     int8_t should_launch_at_startup;
     int8_t set_show_window;
-    bool   no_updater;
+    bool   skip_updater, from_updater;
 
-    parse_args(NULL, NULL, &theme_was_set_on_argv, &should_launch_at_startup, &set_show_window, &no_updater);
+    utox_init();
+
+    parse_args(NULL, NULL,
+               &skip_updater,
+               &from_updater,
+               &theme_was_set_on_argv,
+               &should_launch_at_startup,
+               &set_show_window
+               );
 
     if (should_launch_at_startup == 1 || should_launch_at_startup == -1) {
-        debug("Start on boot not supported on this OS!\n");
+        LOG_TRACE("Android", "Start on boot not supported on this OS!" );
     }
 
     if (set_show_window == 1 || set_show_window == -1) {
-        debug("Showing/hiding windows not supported on this OS!\n");
+        LOG_TRACE("Android", "Showing/hiding windows not supported on this OS!" );
     }
 
-    if (no_updater == true) {
-        debug("Disabling the updater is not supported on this OS.\n");
+    if (skip_updater == true) {
+        LOG_TRACE("Android", "Disabling the updater is not supported on this OS." );
     }
 
     // Make sure glue isn't stripped
@@ -722,14 +741,11 @@ static void android_main(struct android_app *state) {
     UTOX_SAVE *save = config_load();
     theme_load(THEME_DEFAULT);
 
-    utox_init();
-
     thread(toxcore_thread, NULL);
 
     initfonts();
 
-    dropdown_dpi.selected = dropdown_dpi.over = 15;
-    ui_set_scale(21);
+    ui_rescale(12);
 
     /* wait for tox thread to start */
     while (!tox_thread_init) {
@@ -759,7 +775,7 @@ static void android_main(struct android_app *state) {
         int    rlen, len;
         PIPING piping;
         while ((len = read(pipefd[0], (void *)&piping, sizeof(PIPING))) > 0) {
-            debug("%u %u\n", len, sizeof(PIPING));
+            LOG_TRACE("Android", "%u %u" , len, sizeof(PIPING));
             while (len != sizeof(PIPING)) {
                 if ((rlen = read(pipefd[0], (void *)&piping + len, sizeof(PIPING) - len)) > 0) {
                     len += rlen;
@@ -796,7 +812,7 @@ static void android_main(struct android_app *state) {
         usleep(1000);
     }
 
-    debug("ANDROID DESTROYED\n");
+    LOG_TRACE("Android", "ANDROID DESTROYED" );
 }
 
 void showkeyboard(bool show) {
@@ -873,7 +889,7 @@ static void onInputQueueDestroyed(ANativeActivity *act, AInputQueue *queue) {
 
 static void onContentRectChanged(ANativeActivity *activity, const ARect *r) {
     rect = *r;
-    debug("rect: %u %u %u %u\n", rect.left, rect.right, rect.top, rect.bottom);
+    LOG_TRACE("Android", "rect: %u %u %u %u" , rect.left, rect.right, rect.top, rect.bottom);
 
     settings.window_baseline = rect.bottom;
     _redraw                  = 1;
@@ -903,4 +919,4 @@ __attribute__((externally_visible)) void ANativeActivity_onCreate(ANativeActivit
     pthread_create(&thread, &myattr, (void *(*)(void *))android_main, NULL);
 }
 
-void launch_at_startup(int is_launch_at_startup) {}
+void launch_at_startup(bool should) {}

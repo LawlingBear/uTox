@@ -1,16 +1,15 @@
 #ifndef FRIEND_H
 #define FRIEND_H
 
-#include "avatar.h"
 #include "messages.h"
-
-#include "av/audio.h"
 
 #include <tox/tox.h>
 
+typedef struct avatar AVATAR;
 typedef struct edit_change EDIT_CHANGE;
 typedef struct file_transfer FILE_TRANSFER;
 typedef uint8_t *UTOX_IMAGE;
+typedef unsigned int ALuint;
 
 typedef struct friend_meta_data {
     uint8_t version;
@@ -60,7 +59,7 @@ typedef struct utox_friend {
     bool    typing;
     bool    video_inline;
 
-    AVATAR avatar;
+    AVATAR *avatar;
 
     /* Messages */
     bool          skip_msg_logging;
@@ -75,33 +74,46 @@ typedef struct utox_friend {
     ALuint   audio_dest;
 
     /* File transfers */
-    bool     ft_autoaccept;
+    bool ft_autoaccept;
 
-    FILE_TRANSFER  *file_transfers_incoming;
-    uint16_t        file_transfers_incoming_size;
-    uint16_t        file_transfers_incoming_active_count;
+    FILE_TRANSFER  *ft_incoming;
+    uint16_t        ft_incoming_size;
+    uint16_t        ft_incoming_active_count;
 
-    FILE_TRANSFER  *file_transfers_outgoing;
-    uint16_t        file_transfers_outgoing_size;
-    uint16_t        file_transfers_outgoing_active_count;
+    FILE_TRANSFER  *ft_outgoing;
+    uint16_t        ft_outgoing_size;
+    uint16_t        ft_outgoing_active_count;
 } FRIEND;
 
 typedef struct utox_friend_request {
-    uint16_t length;
-    uint8_t  id[TOX_ADDRESS_SIZE];
+    uint16_t number;
+    uint8_t  bin_id[TOX_ADDRESS_SIZE];
 
-    char msg[0];
-} FRIENDREQ;
+    char *msg;
+    size_t length;
+} FREQUEST;
 
-
-#define friend_id(f) (f - friend)
+// add friend page
+uint8_t addfriend_status;
 
 #define UTOX_FRIEND_NAME(f) ((f->alias) ? f->alias : f->name)
 #define UTOX_FRIEND_NAME_LENGTH(f) ((f->alias) ? f->alias_length : f->name_length)
 
-FRIEND friend[128];
+/*
+ * Gets the friend at position friend_number
+ */
+FRIEND *get_friend(uint32_t friend_number);
 
-FRIEND* get_friend(uint32_t friend_number);
+FREQUEST *get_frequest(uint16_t frequest_number);
+
+/* Add a new friend request */
+uint16_t friend_request_new(const uint8_t *id, const uint8_t *msg, size_t length);
+void friend_request_free(uint16_t number);
+
+/*
+ * Frees all of your friends
+ */
+void free_friends(void);
 
 void utox_friend_init(Tox *tox, uint32_t friend_number);
 
@@ -132,5 +144,19 @@ FRIEND *find_friend_by_name(uint8_t *name);
 
 /* Notifies the user that a friend is online or offline */
 void friend_notify_status(FRIEND *f, const uint8_t *msg, size_t msg_length, char *state);
+
+// Saves user meta data to disk
+void utox_write_metadata(FRIEND *f);
+
+/** convert string to tox id
+ *  on success: returns 1
+ *  on failure: returns 0
+ *  notes: dest must be TOX_FRIEND_ADDRESS_SIZE bytes large, some data may be written to dest even on failure
+ */
+bool string_to_id(uint8_t *dest, char *src);
+
+/* same as id_to_string(), but for TOX_PUBLIC_KEY_SIZE
+ */
+void cid_to_string(char *dest, uint8_t *src);
 
 #endif

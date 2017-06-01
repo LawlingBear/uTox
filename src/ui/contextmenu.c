@@ -1,9 +1,12 @@
 #include "contextmenu.h"
 
 #include "draw.h"
-#include "../theme.h"
 
-// FIXME: Required for UNUSED()
+#include "../macros.h"
+#include "../settings.h"
+#include "../theme.h"
+#include "../ui.h"
+
 #include "../main.h"
 
 static CONTEXTMENU context_menu;
@@ -27,7 +30,7 @@ static void calculate_pos_and_width(CONTEXTMENU *b, int *x, int *w) {
     }
 
     // Push away from the right border to fit.
-    if (*x + *w >= settings.window_width) {
+    if (*x + *w >= (int)settings.window_width) {
         *x -= *w;
     }
 }
@@ -147,13 +150,13 @@ void contextmenu_new_ex(uint8_t count, void *userdata, void (*onselect)(uint8_t)
 
     b->y      = mouse.y;
     b->height = CONTEXT_HEIGHT * count;
-    if (b->y + b->height >= settings.window_height) {
+    if (b->y + b->height >= (int)settings.window_height) {
         b->y -= b->height;
     }
     b->x     = mouse.x;
     b->width = CONTEXT_WIDTH;
 
-    b->open      = 1;
+    b->open      = true;
     b->count     = count;
     b->over      = 0xFF;
     b->onselect  = onselect;

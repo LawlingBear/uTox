@@ -1,7 +1,12 @@
 #include "main.h"
 
-#include "../logging_native.h"
-#include "../main.h"
+#include "../debug.h"
+#include "../filesys.h"
+#include "../settings.h"
+
+#include <io.h>
+#include <stdio.h>
+#include <string.h>
 
 static FILE* get_file(wchar_t path[UTOX_FILE_NAME_LENGTH], UTOX_FILE_OPTS opts) {
     // assert(UTOX_FILE_NAME_LENGTH <= (32,767 wide characters) );
@@ -13,6 +18,7 @@ static FILE* get_file(wchar_t path[UTOX_FILE_NAME_LENGTH], UTOX_FILE_OPTS opts) 
         rw |= GENERIC_READ;
         mode[0] = 'r';
         if (opts & UTOX_FILE_OPTS_WRITE || opts & UTOX_FILE_OPTS_APPEND) {
+            rw |= GENERIC_WRITE;
             create = OPEN_ALWAYS;
         }
     } else if (opts & UTOX_FILE_OPTS_APPEND) {
@@ -36,49 +42,60 @@ static FILE* get_file(wchar_t path[UTOX_FILE_NAME_LENGTH], UTOX_FILE_OPTS opts) 
     return _fdopen(_open_osfhandle((intptr_t)winFile, 0), mode);
 }
 
-FILE *native_get_file(const uint8_t *name, size_t *size, UTOX_FILE_OPTS opts) {
-    uint8_t path[UTOX_FILE_NAME_LENGTH] = { 0 };
+FILE *native_get_file(const uint8_t *name, size_t *size, UTOX_FILE_OPTS opts, bool portable_mode) {
+    char path[UTOX_FILE_NAME_LENGTH] = { 0 };
 
-    if (settings.portable_mode) {
-        strcpy((char *)path, portable_mode_save_path);
+    if (portable_mode) {
+        strcpy(path, portable_mode_save_path);
     } else {
         if (FAILED(SHGetFolderPath(NULL, CSIDL_APPDATA, NULL, 0, path))) {
             if (FAILED(SHGetFolderPath(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, path))) {
-                strcpy((char *)path, portable_mode_save_path);
+                strcpy(path, portable_mode_save_path);
             }
         }
     }
 
     if (opts > UTOX_FILE_OPTS_DELETE) {
-        debug_error("NATIVE:\tDon't call native_get_file with UTOX_FILE_OPTS_DELETE in combination with other options.\n");
+        LOG_ERR("WinFilesys", "Don't call native_get_file with UTOX_FILE_OPTS_DELETE in combination with other options.");
         return NULL;
     } else if (opts & UTOX_FILE_OPTS_WRITE && opts & UTOX_FILE_OPTS_APPEND) {
-        debug_error("NATIVE:\tDon't call native_get_file with UTOX_FILE_OPTS_WRITE in combination with UTOX_FILE_OPTS_APPEND.\n");
+        LOG_ERR("WinFilesys", "Don't call native_get_file with UTOX_FILE_OPTS_WRITE in combination with UTOX_FILE_OPTS_APPEND.");
         return NULL;
     }
 
-    snprintf((char *)path + strlen((char *)path), UTOX_FILE_NAME_LENGTH - strlen((char *)path), "/Tox/");
+    snprintf(path + strlen(path), UTOX_FILE_NAME_LENGTH - strlen(path), "/Tox/");
 
-    if (strlen((char *)path) + strlen((char *)name) >= UTOX_FILE_NAME_LENGTH) {
-        debug_error("NATIVE:\tLoad directory name too long\n");
+    if (strlen(path) + strlen((char *)name) >= UTOX_FILE_NAME_LENGTH) {
+        LOG_ERR("WinFilesys", "Load directory name too long");
         return NULL;
+    }
+
+    char *tmp_path = _strdup((char *)name); // free() doesn't work if I touch this pointer at all, so..
+    char *path_pointer = tmp_path;          // this pointer gets to hold the original location to free.
+    if (!tmp_path) {
+        LOG_FATAL_ERR(EXIT_MALLOC, "WinFilesys", "Unable to allocate memory for file path.");
     }
 
     // Append the subfolder to the path and remove it from the name.
-    for (char *folder_divider = strstr(name, "/"); folder_divider != NULL; folder_divider = strstr(name, "/")) {
+    for (char *folder_divider = strstr(tmp_path, "/");
+         folder_divider != NULL;
+         folder_divider = strstr(tmp_path, "/"))
+    {
         ++folder_divider; // Skip over the / we're pointing to.
-        snprintf((char *)path + strlen((char *)path), strlen(name) - strlen(folder_divider), name);
-        char *new_name = name + strlen(name) - strlen(folder_divider);
-        name = new_name;
+        snprintf(path + strlen(path), strlen(tmp_path) - strlen(folder_divider), tmp_path);
+        char *new_path = tmp_path + strlen(tmp_path) - strlen(folder_divider);
+        tmp_path = new_path;
     }
 
     if (opts & UTOX_FILE_OPTS_WRITE || opts & UTOX_FILE_OPTS_MKDIR) {
-        if (!native_create_dir(path)) {
-            debug_error("NATIVE:\t: Failed to create path %s.\n", path);
+        if (!native_create_dir((uint8_t *)path)) {
+            LOG_ERR("WinFilesys", "Failed to create path %s.", path);
         }
     }
 
-    snprintf((char *)path + strlen((char *)path), UTOX_FILE_NAME_LENGTH - strlen((char *)path), "/%s", (char *)name);
+    snprintf(path + strlen(path), UTOX_FILE_NAME_LENGTH - strlen(path), "%s", tmp_path);
+
+    free(path_pointer);
 
     for (size_t i = 0; path[i] != '\0'; ++i) {
         if (path[i] == '/') {
@@ -87,25 +104,28 @@ FILE *native_get_file(const uint8_t *name, size_t *size, UTOX_FILE_OPTS opts) {
     }
 
     wchar_t wide[UTOX_FILE_NAME_LENGTH] = { 0 };
-    MultiByteToWideChar(CP_UTF8, 0, path, strlen((char *)path), wide, UTOX_FILE_NAME_LENGTH);
+    MultiByteToWideChar(CP_UTF8, 0, path, strlen(path), wide, UTOX_FILE_NAME_LENGTH);
 
     if (opts == UTOX_FILE_OPTS_DELETE) {
         if (!DeleteFile(path)) {
-            debug_error("NATIVE:\tCould not delete file: %s - Error: %d\n", path, GetLastError());
+            LOG_ERR("WinFilesys", "Could not delete file: %s - Error: %d" , path, GetLastError());
         }
+
         return NULL;
     }
+
 
     FILE *fp = get_file(wide, opts);
 
-    if (fp == NULL) {
+    if (!fp) {
         if (opts > UTOX_FILE_OPTS_READ) {
-            debug_error("NATIVE:\tCould not open %S for writing.\n", wide);
+            LOG_NOTE("WinFilesys", "Could not open %S for writing.", wide);
         }
+
         return NULL;
     }
 
-    if (size != NULL && opts & UTOX_FILE_OPTS_READ) {
+    if (size && opts & UTOX_FILE_OPTS_READ) {
         fseek(fp, 0, SEEK_END);
         *size = ftell(fp);
         fseek(fp, 0, SEEK_SET);
@@ -131,17 +151,17 @@ bool native_create_dir(const uint8_t *filepath) {
         }
     }
 
-    const int error = SHCreateDirectoryEx(hwnd, path, NULL);
+    const int error = SHCreateDirectoryEx(NULL, (char *)path, NULL);
     switch(error) {
         case ERROR_SUCCESS:
+            LOG_NOTE("WinFilesys", "Created path: `%s` - %d" , filepath, error);
         case ERROR_FILE_EXISTS:
         case ERROR_ALREADY_EXISTS:
-            debug_notice("NATIVE:\tCreated path: `%s` - %d\n", filepath, error);
             return true;
             break;
 
         case ERROR_BAD_PATHNAME:
-            debug_error("NATIVE:\tUnable to create path: `%s` - bad path name.\n", filepath);
+            LOG_WARN("WinFilesys", "Unable to create path: `%s` - bad path name." , filepath);
             return false;
             break;
 
@@ -149,47 +169,55 @@ bool native_create_dir(const uint8_t *filepath) {
         case ERROR_PATH_NOT_FOUND:
         case ERROR_CANCELLED:
         default:
-            debug_error("NATIVE:\tUnable to create path: `%s` - error %d\n", filepath, error);
+            LOG_ERR("WinFilesys", "Unable to create path: `%s` - error %d" , filepath, error);
             return false;
             break;
     }
 }
 
-bool native_remove_file(const uint8_t *name, size_t length) {
-    uint8_t path[UTOX_FILE_NAME_LENGTH] = { 0 };
+bool native_remove_file(const uint8_t *name, size_t length, bool portable_mode) {
+    char path[UTOX_FILE_NAME_LENGTH] = { 0 };
 
-    if (settings.portable_mode) {
-        strcpy((char *)path, portable_mode_save_path);
+    if (portable_mode) {
+        strcpy(path, portable_mode_save_path);
     } else {
         bool have_path = false;
-        have_path      = SUCCEEDED(SHGetFolderPath(NULL, CSIDL_APPDATA, NULL, 0, (char *)path));
+        have_path      = SUCCEEDED(SHGetFolderPath(NULL, CSIDL_APPDATA, NULL, 0, path));
 
         if (!have_path) {
-            have_path = SUCCEEDED(SHGetFolderPath(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, (char *)path));
+            have_path = SUCCEEDED(SHGetFolderPath(NULL, CSIDL_LOCAL_APPDATA, NULL, 0, path));
         }
 
         if (!have_path) {
-            strcpy((char *)path, portable_mode_save_path);
+            strcpy(path, portable_mode_save_path);
             have_path = true;
         }
     }
 
 
-    if (strlen((const char *)path) + length >= UTOX_FILE_NAME_LENGTH) {
-        debug("NATIVE:\tFile/directory name too long, unable to remove\n");
+    if (strlen(path) + length >= UTOX_FILE_NAME_LENGTH) {
+        LOG_TRACE("WinFilesys", "File/directory name too long, unable to remove" );
         return false;
     } else {
-        snprintf((char *)path + strlen((const char *)path), UTOX_FILE_NAME_LENGTH - strlen((const char *)path),
+        snprintf(path + strlen(path), UTOX_FILE_NAME_LENGTH - strlen(path),
                  "\\Tox\\%.*s", (int)length, (char *)name);
     }
 
-    if (remove((const char *)path)) {
-        debug_error("NATIVE:\tUnable to delete file!\n\t\t%s\n", path);
+    if (remove(path)) {
+        LOG_ERR("WinFilesys", "Unable to delete file!\n\t\t%s" , path);
         return false;
     } else {
-        debug_info("NATIVE:\tFile deleted!\n");
-        debug("NATIVE:\t\t%s\n", path);
+        LOG_INFO("WinFilesys", "File deleted!" );
+        LOG_TRACE("WinFilesys", "\t%s" , path);
     }
 
     return true;
+}
+
+bool native_move_file(const uint8_t *current_name, const uint8_t *new_name) {
+    if (!current_name || !new_name) {
+        return false;
+    }
+
+    return MoveFile((char *)current_name, (char *)new_name);
 }

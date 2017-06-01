@@ -1,18 +1,19 @@
 project(utoxAV LANGUAGES C)
 
 add_library(utoxAV STATIC
-    utox_av.h
     utox_av.c
     audio.c
-    audio.h
-    video.h
     video.c
     )
 
-if(NOT APPLE)
-    target_link_libraries(utoxAV openal)
+if(WIN32)
+    target_link_libraries(utoxAV OpenAL32) # Windows needs to be linked against OpenAL32
+elseif(NOT APPLE)
+    target_link_libraries(utoxAV openal) #Everything but OSX can be linked against openal
+else()
+    target_link_libraries(utoxAV opus) # Link OSX against opus
 endif()
 
-if(FILTER_AUDIO)
+if(ENABLE_FILTERAUDIO)
     target_link_libraries(utoxAV filteraudio)
 endif()

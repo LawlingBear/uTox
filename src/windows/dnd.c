@@ -1,12 +1,12 @@
 #include "main.h"
 
 #include "../filesys.h"
+#include "../file_transfers.h"
 #include "../flist.h"
 #include "../friend.h"
-#include "../logging_native.h"
+#include "../debug.h"
 #include "../tox.h"
-
-// FIXME: Required for UNUSED()
+#include "../macros.h"
 #include "../main.h"
 
 typedef struct {
@@ -63,9 +63,9 @@ HRESULT __stdcall dnd_DragLeave(IDropTarget *UNUSED(lpMyObj)) {
 HRESULT __stdcall dnd_Drop(IDropTarget *UNUSED(lpMyObj), IDataObject *pDataObject,
                            DWORD UNUSED(grfKeyState), POINTL UNUSED(pt), DWORD *pdwEffect) {
     *pdwEffect = DROPEFFECT_COPY;
-    debug_notice("DnD:\tDroppped!\n");
+    LOG_NOTE("DnD", "Droppped!" );
 
-    if (flist_get_selected()->item != ITEM_FRIEND) {
+    if (!flist_get_friend()) {
         return S_OK;
     }
 
@@ -81,24 +81,41 @@ HRESULT __stdcall dnd_Drop(IDropTarget *UNUSED(lpMyObj), IDataObject *pDataObjec
     if (r == S_OK) {
         HDROP h = medium.hGlobal;
         int count = DragQueryFile(h, ~0, NULL, 0);
-        debug_info("%u files dropped\n", count);
+        LOG_INFO("WINDND", "%u files dropped\n", count);
 
-        char *paths = calloc(count, sizeof(uint8_t) * UTOX_FILE_NAME_LENGTH);
-        if (paths) {
-            char *p = paths;
-            for(int i = 0; i != count; i++) {
-                p += DragQueryFile(h, i, p, UTOX_FILE_NAME_LENGTH);
-                *p++ = '\n';
+        for (int i = 0; i < count; i++) {
+            LOG_NOTE("WINDND", "Sending file number %i", i);
+            UTOX_MSG_FT *msg = calloc(1, sizeof(UTOX_MSG_FT));
+            if (!msg) {
+                LOG_ERR("WINDND", "Unable to alloc for UTOX_MSG_FT");
+                return 0;
             }
 
-            postmessage_toxcore(TOX_FILE_SEND_NEW, (FRIEND*)flist_get_selected()->data - friend, 0xFFFF, paths);
-        } else {
-            debug_error("DnD:\tUnable to get memory for drag and drop file names... this is bad!\n");
+            char *path = calloc(1, UTOX_FILE_NAME_LENGTH);
+            if (!path) {
+                LOG_ERR("WINDND", "Unable to alloc for UTOX_MSG_FT");
+                free(msg);
+                return 0;
+            }
+
+            DragQueryFile(h, i, path, UTOX_FILE_NAME_LENGTH);
+
+            msg->file = fopen(path, "rb");
+            if (!msg->file) {
+                LOG_ERR("WINDND", "Unable to read file %s" , path);
+                free(msg);
+                free(path);
+                return 0;
+            }
+
+            msg->name = (uint8_t *)path;
+            postmessage_toxcore(TOX_FILE_SEND_NEW, flist_get_friend()->number, 0, msg);
+            LOG_INFO("WINDND", "File number %i sent!" , i);
         }
 
         ReleaseStgMedium(&medium);
     } else {
-        debug_error("itz failed! %lX\n", r);
+        LOG_ERR("WINDND", "itz failed! %lX", r);
     }
 
     return S_OK;

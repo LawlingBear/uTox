@@ -3,8 +3,8 @@
 #include "draw.h"
 #include "svg.h"
 
-// FIXME: Required for UNUSED()
-#include "../main.h"
+#include "../macros.h"
+#include "../ui.h"
 
 void scroll_draw(SCROLLABLE *s, int x, int y, int width, int height) {
     uint32_t c            = s->content_height;

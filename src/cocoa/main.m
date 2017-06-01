@@ -1,17 +1,23 @@
 #include "main.h"
 
 #include "../commands.h"
+#include "../debug.h"
 #include "../filesys.h"
-#include "../logging_native.h"
 #include "../main.h"
+#include "../settings.h"
 #include "../theme.h"
 #include "../tox.h"
 #include "../ui.h"
-#include "../util.h"
 #include "../utox.h"
 
 #include "../av/utox_av.h"
-#include "../ui/dropdowns.h"
+#include "../av/video.h"
+
+#include "../native/notify.h"
+
+#include "../ui/dropdown.h"
+
+#include "../layout/settings.h"
 
 #import <AppKit/AppKit.h>
 #import <Foundation/Foundation.h>
@@ -29,47 +35,6 @@ struct thread_call {
 
 #define DEFAULT_WIDTH (382 * DEFAULT_SCALE)
 #define DEFAULT_HEIGHT (320 * DEFAULT_SCALE)
-
-// TODO move these function to a logging.m file to provide implementation for what is declared in logging.h
-void debug(const char *fmt, ...) {
-    if (utox_verbosity() < VERBOSITY_DEBUG) {
-        return;
-    }
-    va_list l;
-    va_start(l, fmt);
-    NSLogv(@(fmt), l);
-    va_end(l);
-}
-
-void debug_info(const char *fmt, ...) {
-    if (utox_verbosity() < VERBOSITY_INFO) {
-        return;
-    }
-    va_list l;
-    va_start(l, fmt);
-    NSLogv(@(fmt), l);
-    va_end(l);
-}
-
-void debug_notice(const char *fmt, ...) {
-    if (utox_verbosity() < VERBOSITY_NOTICE) {
-        return;
-    }
-    va_list l;
-    va_start(l, fmt);
-    NSLogv(@(fmt), l);
-    va_end(l);
-}
-
-void debug_error(const char *fmt, ...) {
-    if (utox_verbosity() < VERBOSITY_ERROR) {
-        return;
-    }
-    va_list l;
-    va_start(l, fmt);
-    NSLogv(@(fmt), l);
-    va_end(l);
-}
 
 int NATIVE_IMAGE_IS_VALID(NATIVE_IMAGE *img) {
     return img != NULL && img->image != nil;
@@ -107,8 +72,6 @@ void image_free(NATIVE_IMAGE *img) {
     CGImageRelease(img->image);
     free(img);
 }
-
-static BOOL theme_set_on_argv = NO;
 
 void *thread_trampoline(void *call) {
     struct thread_call args = *(struct thread_call *)call;
@@ -239,10 +202,10 @@ void ensure_directory_r(char *path, int perm) {
     }
 }
 
-bool native_remove_file(const uint8_t *name, size_t length) {
+bool native_remove_file(const uint8_t *name, size_t length, bool portable_mode) {
     uint8_t path[UTOX_FILE_NAME_LENGTH] = { 0 };
 
-    if (settings.portable_mode) {
+    if (portable_mode) {
         const char *curr = [NSBundle.mainBundle.bundlePath stringByDeletingLastPathComponent].UTF8String;
         snprintf((char *)path, UTOX_FILE_NAME_LENGTH, "%s/tox/", curr);
     } else {
@@ -251,7 +214,7 @@ bool native_remove_file(const uint8_t *name, size_t length) {
     }
 
     if (strlen((const char *)path) + length >= UTOX_FILE_NAME_LENGTH) {
-        debug("NATIVE:\tFile/directory name too long, unable to remove\n");
+        LOG_TRACE("NATIVE", "File/directory name too long, unable to remove" );
         return 0;
     } else {
         snprintf((char *)path + strlen((const char *)path), UTOX_FILE_NAME_LENGTH - strlen((const char *)path), "%.*s",
@@ -259,11 +222,11 @@ bool native_remove_file(const uint8_t *name, size_t length) {
     }
 
     if (remove((const char *)path)) {
-        debug_error("NATIVE:\tUnable to delete file!\n\t\t%s\n", path);
+        LOG_ERR("NATIVE", "Unable to delete file!\n\t\t%s" , path);
         return 0;
     } else {
-        debug_info("NATIVE:\tFile deleted!\n");
-        debug("NATIVE:\t\t%s\n", path);
+        LOG_INFO("NATIVE", "File deleted!" );
+        LOG_TRACE("NATIVE", "\t%s" , path);
     }
     return 1;
 }
@@ -353,7 +316,7 @@ void redraw(void) {
     [ad soilWindowContents];
 }
 
-void launch_at_startup(int should) {
+void launch_at_startup(bool should) {
     LSSharedFileListRef items = LSSharedFileListCreate(kCFAllocatorDefault, kLSSharedFileListSessionLoginItems, NULL);
     if (should) {
         CFRelease(LSSharedFileListInsertItemURL(items, kLSSharedFileListItemLast, NULL, NULL,
@@ -423,22 +386,14 @@ void launch_at_startup(int should) {
     }
 
     /* load save data */
-    UTOX_SAVE *save = config_load();
-    if (!theme_set_on_argv) {
-        settings.theme          = save->theme;
-        dropdown_theme.selected = save->theme;
-    }
     theme_load(settings.theme);
-
-
-    utox_init();
 
     char title_name[128];
     snprintf(title_name, 128, "%s %s (version: %s)", TITLE, SUB_TITLE, VERSION);
 
 #define WINDOW_MASK (NSTitledWindowMask | NSClosableWindowMask | NSMiniaturizableWindowMask | NSResizableWindowMask)
     self.utox_window = [[NSWindow alloc]
-        initWithContentRect:(NSRect) { save->window_x, save->window_y, save->window_width, save->window_height }
+        initWithContentRect:(NSRect) { settings.window_x, settings.window_y, settings.window_width, settings.window_height }
                   styleMask:WINDOW_MASK
                     backing:NSBackingStoreBuffered
                       defer:NO
@@ -453,7 +408,7 @@ void launch_at_startup(int should) {
 
                             self.utox_window.contentView =
                                 [[[uToxView alloc] initWithFrame:(CGRect){ 0, 0, self.utox_window.frame.size }] autorelease];
-                            ui_set_scale((save->scale + 1) ?: 2);
+
                             ui_size(settings.window_width, settings.window_height);
 
                             /* start the tox thread */
@@ -470,9 +425,6 @@ void launch_at_startup(int should) {
 
                             [self.utox_window makeFirstResponder:self.utox_window.contentView];
                             [self.utox_window makeKeyAndOrderFront:self];
-
-                            /* done with save */
-                            free(save);
 }
 
 - (NSMenu *)applicationDockMenu:(NSApplication *)sender {
@@ -517,7 +469,6 @@ void launch_at_startup(int should) {
         yieldcpu(1);
     }
 
-    debug("clean exit\n");
 }
 
 - (void)soilWindowContents {
@@ -566,23 +517,30 @@ void launch_at_startup(int should) {
 @end
 
 int main(int argc, char const *argv[]) {
-    bool   theme_was_set_on_argv;
     int8_t should_launch_at_startup;
     int8_t set_show_window;
-    bool   no_updater;
+    bool   skip_updater;
 
-    parse_args(argc, argv, &theme_was_set_on_argv, &should_launch_at_startup, &set_show_window, &no_updater);
+    utox_init();
+
+    settings.window_width  = DEFAULT_WIDTH;
+    settings.window_height = DEFAULT_HEIGHT;
+
+    parse_args(argc, argv,
+               &skip_updater,
+               &should_launch_at_startup,
+               &set_show_window);
 
     if (should_launch_at_startup == 1 || should_launch_at_startup == -1) {
-        debug("Start on boot not supported on this OS!\n");
+        LOG_TRACE("NATIVE", "Start on boot not supported on this OS!" );
     }
 
     if (set_show_window == 1 || set_show_window == -1) {
-        debug("Showing/hiding windows not supported on this OS!\n");
+        LOG_TRACE("NATIVE", "Showing/hiding windows not supported on this OS!" );
     }
 
-    if (no_updater == true) {
-        debug("Disabling the updater is not supported on this OS. Updates are managed by the app store.\n");
+    if (skip_updater == true) {
+        LOG_TRACE("NATIVE", "Disabling the updater is not supported on this OS. Updates are managed by the app store." );
     }
 
     setlocale(LC_ALL, "");
@@ -591,8 +549,7 @@ int main(int argc, char const *argv[]) {
     dropdown_language.selected = dropdown_language.over = LANG;
 
     /* set the width/height of the drawing region */
-    settings.window_width  = DEFAULT_WIDTH;
-    settings.window_height = DEFAULT_HEIGHT;
+
     ui_size(settings.window_width, settings.window_height);
 
     /* event loop */

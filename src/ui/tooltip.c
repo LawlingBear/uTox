@@ -2,12 +2,16 @@
 
 #include "draw.h"
 
+#include "../macros.h"
+#include "../settings.h"
 #include "../theme.h"
 #include "../ui.h"
 #include "../utox.h"
 
-// FIXME: Required for UNUSED()
-#include "../main.h"
+#include "../main.h" // mouse, thread
+
+#include "../native/thread.h"
+#include "../native/time.h"
 
 static TOOLTIP tooltip;
 
@@ -168,18 +172,18 @@ static void tooltip_thread(void *UNUSED(args)) {
 
 // This is being called every time the mouse is moving above a button
 void tooltip_new(MAYBE_I18NAL_STRING *text) {
-    TOOLTIP *b = &tooltip;
+    TOOLTIP *tip = &tooltip;
 
-    b->can_show = true;
-    b->tt_text  = text;
+    tip->can_show = true;
+    tip->tt_text  = text;
 
-    if (b->visible || b->mouse_down) {
+    if (tip->visible || tip->mouse_down) {
         return;
     }
 
-    if (!b->thread && !kill_thread) {
+    if (!tip->thread && !kill_thread) {
         thread(tooltip_thread, NULL);
-        b->thread = true;
+        tip->thread = true;
     }
 
     reset_time = 1;

@@ -1,20 +1,34 @@
 #include "main.h"
 #include "cursor.h"
+
 #include "../avatar.h"
 #include "../chatlog.h"
 #include "../file_transfers.h"
 #include "../filesys.h"
 #include "../flist.h"
 #include "../friend.h"
+#include "../groups.h"
 #include "../main.h"
 #include "../messages.h"
+#include "../self.h"
+#include "../settings.h"
+#include "../text.h"
 #include "../tox.h"
 #include "../ui.h"
-#include "../util.h"
 #include "../utox.h"
 
 #include "../av/utox_av.h"
+
+#include "../native/clipboard.h"
+#include "../native/keyboard.h"
+#include "../native/ui.h"
+
 #include "../ui/edit.h"
+#include "../ui/panel.h"
+
+#include "../layout/background.h"
+#include "../layout/friend.h"
+#include "../layout/group.h"
 
 NSCursor *cursors[8];
 
@@ -729,7 +743,7 @@ int getbuf(char *ptr, size_t len, int value) {
     if (edit_active()) {
         // FIXME: asfasg
         ret = edit_copy(ptr, len);
-    } else if (flist_get_selected()->item == ITEM_FRIEND) {
+    } else if (flist_get_type() == ITEM_FRIEND) {
         ret = messages_selection(&messages_friend, ptr, len, value);
     } else {
         ret = messages_selection(&messages_group, ptr, len, value);
@@ -786,7 +800,7 @@ void paste(void) {
 
         if (owned_ptr) {
             memcpy(owned_ptr, CFDataGetBytePtr(dat), size);
-            friend_sendimage(flist_get_selected()->data, i, CGImageGetWidth(img), CGImageGetHeight(img), (UTOX_IMAGE)owned_ptr,
+            friend_sendimage(flist_get_friend(), i, CGImageGetWidth(img), CGImageGetHeight(img), (UTOX_IMAGE)owned_ptr,
                              size);
         } else {
             free(i);
@@ -824,7 +838,7 @@ void notify(char *title, uint16_t title_length, const char *msg, uint16_t msg_le
         if (!is_group) {
             FRIEND *f = object;
             if (friend_has_avatar(f)) {
-                NATIVE_IMAGE *im = f->avatar.img;
+                NATIVE_IMAGE *im = f->avatar->img;
                 size_t        w = CGImageGetWidth(im->image) / im->scale, h = CGImageGetHeight(im->image) / im->scale;
                 NSImage *i = [[NSImage alloc] initWithCGImage:im->image size:(CGSize){ w, h }];
                 if ([usernotification respondsToSelector:@selector(set_identityImage:)]) {
@@ -870,13 +884,19 @@ void update_tray(void) {
 
 void native_export_chatlog_init(uint32_t fid) {
 
+    FRIEND *f = get_friend(fid);
+    if (!f) {
+        LOG_ERR("Cocoa", "Could not get friend with number: %u", fid);
+        return;
+    }
+
     NSSavePanel *picker = [NSSavePanel savePanel];
-    NSString *fname     = [[NSString alloc] initWithBytesNoCopy:friend[fid].name
-                                                     length:friend[fid].name_length
+    NSString *fname     = [[NSString alloc] initWithBytesNoCopy:f->name
+                                                     length:f->name_length
                                                    encoding:NSUTF8StringEncoding
                                                freeWhenDone:NO];
     picker.message = [NSString
-        stringWithFormat:NSSTRING_FROM_LOCALIZED(WHERE_TO_SAVE_FILE_PROMPT), friend[fid].name_length, friend[fid].name];
+        stringWithFormat:NSSTRING_FROM_LOCALIZED(WHERE_TO_SAVE_FILE_PROMPT), f->name_length, f->name];
     picker.nameFieldStringValue = fname;
     [fname release];
     int ret = [picker runModal];
@@ -919,26 +939,28 @@ void native_autoselect_dir_ft(uint32_t fid, FILE_TRANSFER *file) {
     NSString *dest = [downloads stringByAppendingPathComponent:fname];
     [fname release];
 
-    postmessage_toxcore(TOX_FILE_ACCEPT_AUTO, fid, file->file_number, strdup(dest.UTF8String));
+    FILE *f = fopen(dest, "wb");
+    postmessage_toxcore(TOX_FILE_ACCEPT_AUTO, fid, file->file_number, f);
 }
 
 //@"Where do you want to save \"%.*s\"?"
-void file_save_inline(FILE_TRANSFER *file) {
+void file_save_inline_image_png(MSG_HEADER *msg) {
     NSSavePanel *picker = [NSSavePanel savePanel];
     NSString *fname =
-        [[NSString alloc] initWithBytes:file->name length:file->name_length encoding:NSUTF8StringEncoding];
+        [[NSString alloc] initWithBytes:msg->via.ft.name length:msg->via.ft.name_length encoding:NSUTF8StringEncoding];
     picker.message = [NSString
-        stringWithFormat:NSSTRING_FROM_LOCALIZED(WHERE_TO_SAVE_FILE_PROMPT), file->name_length, file->name];
+        stringWithFormat:NSSTRING_FROM_LOCALIZED(WHERE_TO_SAVE_FILE_PROMPT), msg->via.ft.name_length, msg->via.ft.name];
     picker.nameFieldStringValue = fname;
     [fname release];
     int ret = [picker runModal];
 
     if (ret == NSFileHandlingPanelOKButton) {
-        NSURL * destination = picker.URL;
-        NSData *d           = [NSData dataWithBytesNoCopy:file->path length:file->target_size freeWhenDone:NO];
+        NSURL  *destination = picker.URL;
+        NSData *d = [NSData dataWithBytesNoCopy:msg->via.ft.data length:msg->via.ft.data_size freeWhenDone:NO];
         [d writeToURL:destination atomically:YES];
 
-        snprintf((char *)file->path, UTOX_FILE_NAME_LENGTH, "inline.png");
+        snprintf((char *)msg->via.ft.path, UTOX_FILE_NAME_LENGTH, "inline.png"); // TODO : this seems wrong
+        msg->via.ft.inline_png = false;
     }
 }
 //@"Select one or more files to send."

@@ -9,27 +9,33 @@
 #include "../main.h"
 
 #include "../chatlog.h"
-#include "../filesys.h"
+#include "../debug.h"
 #include "../file_transfers.h"
+#include "../filesys.h"
 #include "../friend.h"
-#include "../logging_native.h"
+#include "../settings.h"
 #include "../tox.h"
 
 #include <shlobj.h>
+#include <io.h>
 
 void native_export_chatlog_init(uint32_t friend_number) {
     char *path = calloc(1, UTOX_FILE_NAME_LENGTH);
-    if (path == NULL){
-        debug("SelectDir:\t Could not allocate memory.\n");
+    if (!path){
+        LOG_ERR("SelectDir", " Could not allocate memory." );
         return;
     }
 
-    snprintf(path, UTOX_FILE_NAME_LENGTH, "%.*s.txt", (int)friend[friend_number].name_length,
-             friend[friend_number].name);
+    FRIEND *f = get_friend(friend_number);
+    if (!f) {
+        LOG_ERR("Windows7", "Could not get friend with number: %u", friend_number);
+        return;
+    }
+
+    snprintf(path, UTOX_FILE_NAME_LENGTH, "%.*s.txt", (int)f->name_length, f->name);
 
     OPENFILENAME ofn = {
         .lStructSize = sizeof(OPENFILENAME),
-        .hwndOwner   = hwnd,
         .lpstrFilter = ".txt",
         .lpstrFile   = path,
         .nMaxFile    = UTOX_FILE_NAME_LENGTH,
@@ -40,27 +46,26 @@ void native_export_chatlog_init(uint32_t friend_number) {
     if (GetSaveFileName(&ofn)) {
         FILE *file = fopen(path, "wb");
         if (file) {
-            utox_export_chatlog(friend_number, file);
+            utox_export_chatlog(f->id_str, file);
         } else {
-            debug_error("Opening file %s failed\n", path);
+            LOG_ERR("Windows7", "Opening file %s failed", path);
         }
     } else {
-        debug("GetSaveFileName() failed\n");
+        LOG_ERR("Windows7", "Unable to open file and export chatlog.");
     }
 }
 
- void native_select_dir_ft(uint32_t fid, uint32_t num, FILE_TRANSFER *file){
+void native_select_dir_ft(uint32_t fid, uint32_t num, FILE_TRANSFER *file) {
     char *path = calloc(1, UTOX_FILE_NAME_LENGTH);
-    if (path == NULL){
-        debug("SelectDir:\t Could not allocate memory for path.\n");
+    if (!path) {
+        LOG_ERR("SelectDir", "Could not allocate memory for path.");
         return;
     }
+
     memcpy(path, file->name, file->name_length);
-    path[file->name_length] = 0;
 
     OPENFILENAME ofn = {
         .lStructSize = sizeof(OPENFILENAME),
-        .hwndOwner   = hwnd,
         .lpstrFile   = path,
         .nMaxFile    = UTOX_FILE_NAME_LENGTH,
         .Flags       = OFN_EXPLORER | OFN_NOCHANGEDIR | OFN_NOREADONLYRETURN | OFN_OVERWRITEPROMPT,
@@ -69,72 +74,84 @@ void native_export_chatlog_init(uint32_t friend_number) {
     if (GetSaveFileName(&ofn)) {
         postmessage_toxcore(TOX_FILE_ACCEPT, fid, num, path);
     } else {
-        debug("GetSaveFileName() failed\n");
+        LOG_ERR("Windows7", "Unable to Get save file for incoming FT.");
     }
 }
 
 void native_autoselect_dir_ft(uint32_t fid, FILE_TRANSFER *file) {
-    char *send = calloc(UTOX_FILE_NAME_LENGTH, sizeof(char *));
-    if (send == NULL){
-        debug("AutoSelectDir:\t Could not allocate memory.\n");
+    wchar_t *autoaccept_folder = NULL;
+
+    if (settings.portable_mode) {
+        autoaccept_folder = calloc(1, UTOX_FILE_NAME_LENGTH * sizeof(wchar_t));
+
+        // Convert the portable_mode_save_path into a wide string.
+        wchar_t tmp[UTOX_FILE_NAME_LENGTH];
+        mbstowcs(tmp, portable_mode_save_path, strlen(portable_mode_save_path));
+
+        swprintf(autoaccept_folder, UTOX_FILE_NAME_LENGTH, L"%ls", tmp);
+    } else if (SHGetKnownFolderPath((REFKNOWNFOLDERID)&FOLDERID_Downloads,
+                                    KF_FLAG_CREATE, NULL, &autoaccept_folder) != S_OK) {
+        LOG_ERR("Windows7", "Unable to get auto accept file folder!");
         return;
     }
 
-    wchar_t *path[UTOX_FILE_NAME_LENGTH];
-    wchar_t  sub_path[UTOX_FILE_NAME_LENGTH] = { 0 }; /* I don't trust swprintf on windows anymore, so let's help it */
-    wchar_t  fullpath[UTOX_FILE_NAME_LENGTH] = { 0 }; /* out a bit by initialing everything to 0                     */
-    wchar_t  longname[UTOX_FILE_NAME_LENGTH] = { 0 };
+    wchar_t subpath[UTOX_FILE_NAME_LENGTH] = { 0 };
+    swprintf(subpath, UTOX_FILE_NAME_LENGTH, L"%ls%ls", autoaccept_folder, L"\\Tox_Auto_Accept");
 
     if (settings.portable_mode) {
-        snprintf(send, UTOX_FILE_NAME_LENGTH, "%s\\Tox_Auto_Accept", portable_mode_save_path);
-        debug_notice("Native:\tAuto Accept Directory: \"%s\"\n", send);
-        postmessage_toxcore(TOX_FILE_ACCEPT_AUTO, fid, file->file_number, send);
-    } else if (!SHGetKnownFolderPath((REFKNOWNFOLDERID)&FOLDERID_Downloads, KF_FLAG_CREATE, 0, path)) {
-        swprintf(sub_path, UTOX_FILE_NAME_LENGTH, L"%ls%ls", *path, L"\\Tox_Auto_Accept");
-        CreateDirectoryW(sub_path, NULL);
+        free(autoaccept_folder);
     } else {
-        debug("NATIVE:\tUnable to auto save file!\n");
+        CoTaskMemFree(autoaccept_folder);
     }
-    debug_notice("Native:\tAuto Accept Directory: \"%s\"\n", send);
 
-    /* UTF8 name to windows version*/
-    MultiByteToWideChar(CP_UTF8, 0, (char *)file->name, file->name_length, longname, UTOX_FILE_NAME_LENGTH);
-    swprintf(fullpath, UTOX_FILE_NAME_LENGTH, L"%ls\\%ls", sub_path, longname);
-    /* Windows doesn't like UTF-8 strings, so we have to hold it's hand. */
-    file->via.file = _fdopen(_open_osfhandle((intptr_t)CreateFileW(fullpath, GENERIC_WRITE, FILE_SHARE_READ, NULL,
-                                                               CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL),
-                                              0),
-                             "wb");
+    CreateDirectoryW(subpath, NULL);
 
-    /* Back to UTF8 for uTox */
-    native_to_utf8str(fullpath, send, UTOX_FILE_NAME_LENGTH);
-    postmessage_toxcore(TOX_FILE_ACCEPT_AUTO, fid, file->file_number, send);
+    wchar_t filename[UTOX_FILE_NAME_LENGTH] = { 0 };
+    MultiByteToWideChar(CP_UTF8, 0, (char *)file->name, file->name_length, filename, UTOX_FILE_NAME_LENGTH);
+
+    wchar_t fullpath[UTOX_FILE_NAME_LENGTH] = { 0 };
+    swprintf(fullpath, UTOX_FILE_NAME_LENGTH, L"%ls\\%ls", subpath, filename);
+
+
+    FILE *f = _fdopen(_open_osfhandle((intptr_t)CreateFileW(fullpath, GENERIC_WRITE, FILE_SHARE_READ, NULL,
+                                                            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL),
+                                      0),
+                      "wb");
+
+    if (f) {
+        postmessage_toxcore(TOX_FILE_ACCEPT_AUTO, fid, file->file_number, f);
+    } else {
+        LOG_ERR("Windows7", "Unable to save autoaccepted ft to %ls", fullpath);
+    }
 }
 
-void launch_at_startup(int is_launch_at_startup) {
-    HKEY         hKey;
+void launch_at_startup(bool should) {
     const wchar_t *run_key_path = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
-    wchar_t        path[UTOX_FILE_NAME_LENGTH * 2];
-    uint16_t     path_length = 0, ret = 0;
-    if (is_launch_at_startup == 1) {
-        if (ERROR_SUCCESS == RegOpenKeyW(HKEY_CURRENT_USER, run_key_path, &hKey)) {
-            path_length           = GetModuleFileNameW(NULL, path + 1, UTOX_FILE_NAME_LENGTH * 2);
+
+    if (should) {
+        HKEY hKey;
+        if (RegOpenKeyW(HKEY_CURRENT_USER, run_key_path, &hKey) == ERROR_SUCCESS) {
+            wchar_t path[UTOX_FILE_NAME_LENGTH * 2];
+            uint16_t path_length  = GetModuleFileNameW(NULL, path + 1, UTOX_FILE_NAME_LENGTH * 2);
             path[0]               = '\"';
             path[path_length + 1] = '\"';
             path[path_length + 2] = '\0';
             path_length += 2;
-            ret = RegSetKeyValueW(hKey, NULL, (LPCSTR)(L"uTox"), REG_SZ, path, path_length * 2); /*2 bytes per wchar_t */
-            if (ret == ERROR_SUCCESS) {
-                debug("Successful auto start addition.\n");
+
+            // 2 bytes per wchar_t
+            uint16_t ret = RegSetKeyValueW(hKey, NULL, L"uTox", REG_SZ, path, path_length * 2);
+            if (ret != ERROR_SUCCESS) {
+                LOG_ERR("Windows7", "Unable to set Registry key for startup.");
             }
+
             RegCloseKey(hKey);
         }
-    }
-    if (is_launch_at_startup == 0) {
+    } else {
+        HKEY hKey;
         if (ERROR_SUCCESS == RegOpenKeyW(HKEY_CURRENT_USER, run_key_path, &hKey)) {
-            ret = RegDeleteKeyValueW(hKey, NULL, L"uTox");
+            uint16_t ret = RegDeleteKeyValueW(hKey, NULL, L"uTox");
             if (ret == ERROR_SUCCESS) {
-                debug("Successful auto start deletion.\n");
+                LOG_ERR("Windows7", "Unable to delete Registry key for startup.");
             }
             RegCloseKey(hKey);
         }

@@ -2,9 +2,14 @@
 #import <AppKit/AppKit.h>
 
 #include "main.h"
-#include "../av/utox_av.h"
-#include "../friend.h"
+
 #include "../flist.h"
+#include "../friend.h"
+#include "../ui.h"
+
+#include "../av/utox_av.h"
+
+#include "../native/keyboard.h"
 
 static void stardust_display_capping_done(bool video, uint64_t ret, NSWindow *window);
 static inline CGRect CGRectCentreInRect(CGRect r1, CGRect r2) {
@@ -39,6 +44,10 @@ static inline CGRect CGRectCentreInRect(CGRect r1, CGRect r2) {
     ret.level           = NSStatusWindowLevel;
     return ret;
 }
+
+// Hacky patch I stole from https://developer.apple.com/reference/uikit/nstextalignment/nstextalignmentcenter
+#define NSTextAlignmentCenter 2
+
 
 - (instancetype)initWithFrame:(NSRect)frameRect {
     self = [super initWithFrame:frameRect];
@@ -147,7 +156,7 @@ static void stardust_display_capping_done(bool video, uint64_t ret, NSWindow *wi
             memcpy(owned_ptr, CFDataGetBytePtr(dat), size);
             CFRelease(dat);
 
-            friend_sendimage(flist_get_selected()->data, img, CGImageGetWidth(inliness), CGImageGetHeight(inliness),
+            friend_sendimage(flist_get_friend(), img, CGImageGetWidth(inliness), CGImageGetHeight(inliness),
                              (UTOX_IMAGE)owned_ptr, size);
         } else {
             desktop_capture_from  = screen_id;

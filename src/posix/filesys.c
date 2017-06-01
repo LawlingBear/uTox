@@ -1,13 +1,14 @@
+#include "../filesys.h"
+
+#include "../debug.h"
+
+#include "../native/filesys.h"
+
 #include <assert.h>
-
-#include "../logging_native.h"
-
-#ifdef __OBJC__
-#include "../main.h"
-#include "../cocoa/main.h"
-#else
-#include "../xlib/main.h"
-#endif
+#include <errno.h>
+#include <fcntl.h>
+#include <string.h>
+#include <sys/stat.h>
 
 bool native_create_dir(const uint8_t *filepath) {
     const int status = mkdir((char *)filepath, S_IRWXU);
@@ -38,10 +39,10 @@ static void opts_to_sysmode(UTOX_FILE_OPTS opts, char *mode) {
     return;
 }
 
-FILE *native_get_file(const uint8_t *name, size_t *size, UTOX_FILE_OPTS opts) {
+FILE *native_get_file(const uint8_t *name, size_t *size, UTOX_FILE_OPTS opts, bool portable_mode) {
     uint8_t path[UTOX_FILE_NAME_LENGTH] = { 0 };
 
-    if (settings.portable_mode) {
+    if (portable_mode) {
         snprintf((char *)path, UTOX_FILE_NAME_LENGTH, "./tox/");
     } else {
         snprintf((char *)path, UTOX_FILE_NAME_LENGTH, "%s/.config/tox/", getenv("HOME"));
@@ -59,7 +60,7 @@ FILE *native_get_file(const uint8_t *name, size_t *size, UTOX_FILE_OPTS opts) {
     }
 
     if (strlen((char *)path) + strlen((char *)name) >= UTOX_FILE_NAME_LENGTH) {
-        debug("NATIVE:\tLoad directory name too long\n");
+        LOG_ERR("Filesys", "Load directory name too long" );
         return NULL;
     } else {
         snprintf((char *)path + strlen((char *)path), UTOX_FILE_NAME_LENGTH - strlen((char *)path), "%s", name);
@@ -86,7 +87,7 @@ FILE *native_get_file(const uint8_t *name, size_t *size, UTOX_FILE_OPTS opts) {
     FILE *fp = fopen((char *)path, mode);
 
     if (!fp && opts & UTOX_FILE_OPTS_READ && opts & UTOX_FILE_OPTS_WRITE) {
-        debug_notice("POSIX:\tUnable to simple open, falling back to fd\n");
+        LOG_WARN("POSIX", "Unable to simple open, falling back to fd" );
         // read wont create a file if it doesn't' already exist. If we're allowed to write, lets try
         // to create the file, then reopen it.
         int fd = open((char *)path, O_RDWR | O_CREAT, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
@@ -94,7 +95,7 @@ FILE *native_get_file(const uint8_t *name, size_t *size, UTOX_FILE_OPTS opts) {
     }
 
     if (fp == NULL) {
-        debug_notice("NATIVE:\tCould not open %s\n", path);
+        LOG_TRACE("Filesys", "Could not open %s" , path);
         return NULL;
     }
 
@@ -105,4 +106,12 @@ FILE *native_get_file(const uint8_t *name, size_t *size, UTOX_FILE_OPTS opts) {
     }
 
     return fp;
+}
+
+bool native_move_file(const uint8_t *current_name, const uint8_t *new_name) {
+    if(!current_name || !new_name) {
+        return false;
+    }
+
+    return rename((char *)current_name, (char *)new_name);
 }

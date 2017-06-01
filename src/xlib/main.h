@@ -10,58 +10,22 @@
 #include "dbus.h"
 #endif
 
-#include "freetype.h"
-
-#include "../main.h"
-
 #include "../ui/svg.h"
 
-// TODO: Remove the includes not needed. (E.g. stdio.h)
+#include <stdint.h>
+
+#include <X11/cursorfont.h>
+#include <X11/extensions/Xrender.h>
+#include <X11/extensions/XShm.h>
 #include <X11/X.h>
 #include <X11/Xatom.h>
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
-#include <X11/cursorfont.h>
-#include <X11/extensions/XShm.h>
-#include <X11/extensions/Xrender.h>
-#include <arpa/nameser.h>
-#include <ctype.h>
-#include <dlfcn.h>
-#include <errno.h>
-#include <fcntl.h>
-#include <locale.h>
-#include <netinet/in.h>
-#include <pthread.h>
-#include <resolv.h>
-#include <stdbool.h>
-#include <stdint.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <sys/ioctl.h>
-#include <sys/shm.h>
-#include <sys/stat.h>
-#include <unistd.h>
-
 
 #define DEFAULT_WIDTH (382 * DEFAULT_SCALE)
 #define DEFAULT_HEIGHT (320 * DEFAULT_SCALE)
 
-
-#define KEY_BACK XK_BackSpace
-#define KEY_RETURN XK_Return
-#define KEY_LEFT XK_Left
-#define KEY_RIGHT XK_Right
-#define KEY_TAB XK_Tab
-#define KEY_LEFT_TAB XK_ISO_Left_Tab
-#define KEY_DEL XK_Delete
-#define KEY_END XK_End
-#define KEY_HOME XK_Home
-#define KEY_UP XK_Up
-#define KEY_DOWN XK_Down
-#define KEY_PAGEUP XK_Page_Up
-#define KEY_PAGEDOWN XK_Page_Down
-
+typedef struct native_image NATIVE_IMAGE;
 struct native_image {
     // This is really a Picture, but it is just a typedef for XID, and I didn't
     // want to clutter namespace with #include <X11/extensions/Xrender.h> for it.
@@ -69,56 +33,23 @@ struct native_image {
     XID alpha;
 };
 
-#define NATIVE_IMAGE_IS_VALID(x) (None != (x))
-#define NATIVE_IMAGE_HAS_ALPHA(x) (None != (x->alpha))
-
-/* Main window */
-Display *          display;
-int                screen;
-int                xwin_depth;
-Window             root, window;
-GC                 gc;
-Colormap           cmap;
-Visual *           visual;
-Pixmap             drawbuf;
-Picture            renderpic;
-Picture            colorpic;
-bool               hidden;
-XRenderPictFormat *pictformat;
-
-/* Tray icon window */
-Window   tray_window;
-Pixmap   trayicon_drawbuf;
-Picture  trayicon_renderpic;
-GC       trayicon_gc;
-uint32_t tray_width, tray_height;
-
-Picture bitmap[BM_ENDMARKER];
-Cursor  cursors[8];
-
 Atom wm_protocols, wm_delete_window;
-
-uint32_t scolor;
 
 Atom XA_CLIPBOARD, XA_NET_NAME, XA_UTF8_STRING, targets, XA_INCR;
 Atom XdndAware, XdndEnter, XdndLeave, XdndPosition, XdndStatus, XdndDrop, XdndSelection, XdndDATA, XdndActionCopy;
 Atom XA_URI_LIST, XA_PNG_IMG;
 Atom XRedraw;
 
-Screen *scr;
+Picture bitmap[BM_ENDMARKER];
+Cursor  cursors[8];
 
 /* Screen grab vars */
 uint8_t pointergrab;
-int     grabx, graby, grabpx, grabpy;
-GC      grabgc;
-
-XSizeHints *xsh;
 
 bool     havefocus;
 bool     _redraw;
-uint16_t drawwidth, drawheight;
 
-Window  video_win[32]; // TODO we should allocate this dynamiclly but this'll work for now
+Window  video_win[32]; // TODO we should allocate this dynamically but this'll work for now
 XImage *screen_image;
 
 extern int utox_v4l_fd;
@@ -139,15 +70,13 @@ struct {
 struct {
     int   len, left;
     Atom  type;
-    void *data;
+    char *data;
 } pastebuf;
 
 Picture ximage_to_picture(XImage *img, const XRenderPictFormat *format);
 
 bool doevent(XEvent event);
 
-void tray_window_event(XEvent event);
-void draw_tray_icon(void);
 void togglehide(void);
 
 void pasteprimary(void);

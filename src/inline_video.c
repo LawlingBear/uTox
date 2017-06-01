@@ -13,31 +13,38 @@
 
 #include "inline_video.h"
 
-#include "logging_native.h"
+#include "debug.h"
+#include "macros.h"
+#include "settings.h"
+#include "ui.h"
 
-#include "av/utox_av.h"
+#include "av/video.h"
 
-// FIXME: Required for UNUSED()
-#include "main.h"
+#include "native/image.h"
 
-static UTOX_FRAME_PKG current_frame = { 0 };
+#include <stdlib.h>
+#include <string.h>
+
+static UTOX_FRAME_PKG current_frame = { 0, 0, 0, 0 };
 
 bool inline_set_frame(uint16_t w, uint16_t h, size_t size, void *img) {
     current_frame.w    = w;
     current_frame.h    = h;
     current_frame.size = size;
 
-    current_frame.img = realloc(current_frame.img, size);
-    if (size && current_frame.img) {
-        memcpy(current_frame.img, img, size);
-        return true;
+    uint8_t *tmp = realloc(current_frame.img, size);
+    if (!size || !tmp) {
+        current_frame.w    = 0;
+        current_frame.h    = 0;
+        current_frame.size = 0;
+        tmp ? free(tmp) : free(current_frame.img);
+
+        return false;
     }
 
-    current_frame.w    = 0;
-    current_frame.h    = 0;
-    current_frame.size = 0;
-    free(current_frame.img);
-    return false;
+    current_frame.img = tmp;
+    memcpy(current_frame.img, img, size);
+    return true;
 }
 
 void inline_video_draw(INLINE_VID *UNUSED(p), int x, int y, int width, int height) {
@@ -45,11 +52,12 @@ void inline_video_draw(INLINE_VID *UNUSED(p), int x, int y, int width, int heigh
         return;
     }
 
-    debug("Inline Video:\tDrawing new frame.\n");
+    LOG_TRACE("Inline Video", "Drawing new frame." );
 
     if (current_frame.img && current_frame.size) {
-        draw_inline_image(current_frame.img, current_frame.size, current_frame.w, current_frame.h, x,
-                          y + MAIN_TOP_FRAME_THICK);
+        draw_inline_image(current_frame.img, current_frame.size,
+                          MIN(current_frame.w, width), MIN(current_frame.h, height),
+                          x, y + MAIN_TOP_FRAME_THICK);
     }
 }
 

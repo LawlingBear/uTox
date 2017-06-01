@@ -1,8 +1,14 @@
-#ifndef EDIT_H
-#define EDIT_H
+#ifndef UI_EDIT_H
+#define UI_EDIT_H
+
+#include "panel.h"
 
 #include "../ui.h"
-/*todo: replace windows functions, multiline edits, add missing edit functions (ex: double click to select word)*/
+
+/* TODO replace windows functions, multiline edits, add missing edit functions (ex: double click to select word)*/
+
+#include <stdbool.h>
+#include <stdint.h>
 
 typedef struct scrollable SCROLLABLE;
 
@@ -13,7 +19,6 @@ typedef struct edit_change {
 } EDIT_CHANGE;
 
 typedef struct edit EDIT;
-
 struct edit {
     PANEL panel;
 
@@ -76,7 +81,4 @@ void edit_setmark(uint16_t loc, uint16_t len);
 
 void edit_setselectedrange(uint16_t loc, uint16_t len);
 
-extern EDIT edit_name, edit_status, edit_add_id, edit_add_msg, edit_msg, edit_msg_group, edit_search, edit_proxy_ip,
-    edit_proxy_port, edit_profile_password;
-
-#endif
+#endif // UI_EDIT_H

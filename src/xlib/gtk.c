@@ -1,20 +1,27 @@
+#include "gtk.h"
+
+#include "../avatar.h"
 #include "../chatlog.h"
+#include "../debug.h"
 #include "../file_transfers.h"
 #include "../filesys.h"
 #include "../flist.h"
 #include "../friend.h"
-#include "../logging_native.h"
+#include "../macros.h"
+#include "../text.h"
 #include "../tox.h"
-#include "../util.h"
+#include "../ui.h"
 #include "../utox.h"
+
+#include "../main.h"
+
+#include "../native/thread.h"
 
 #include <dlfcn.h>
 #include <errno.h>
 #include <stdbool.h>
 #include <stdlib.h>
-
-// FIXME: Required for UNUSED()
-#include "../main.h"
+#include <string.h>
 
 #define LIBGTK_FILENAME "libgtk-3.so.0"
 
@@ -110,7 +117,7 @@ static void update_image_preview(void *filechooser, void *image) {
 }
 
 static void ugtk_opensendthread(void *args) {
-    uint32_t fid = (uint32_t)args;
+    size_t fid = (size_t)args;
 
     void *dialog = utoxGTK_file_chooser_dialog_new((const char *)S(SEND_FILE), NULL, GTK_FILE_CHOOSER_ACTION_OPEN,
                                                    "_Cancel", GTK_RESPONSE_CANCEL, "_Open", GTK_RESPONSE_ACCEPT, NULL);
@@ -126,7 +133,7 @@ static void ugtk_opensendthread(void *args) {
         while (p) {
             UTOX_MSG_FT *send = calloc(1, sizeof(UTOX_MSG_FT));
             if (!send) {
-                debug_error("GTK:\tUnabled to malloc for to send an FT msg");
+                LOG_ERR("GTK", "GTK:\tUnabled to malloc for to send an FT msg");
                 while(p) {
                     utoxGTK_free(p->data);
                     p = p->next;
@@ -135,10 +142,10 @@ static void ugtk_opensendthread(void *args) {
                 utoxGTK_open = false;
                 return;
             }
-            debug_info("GTK:\tSending file %s\n", p->data);
+            LOG_INFO("GTK", "Sending file %s" , p->data);
             send->file = fopen(p->data, "rb");
             send->name = (uint8_t*)strdup(p->data);
-            postmessage_toxcore(TOX_FILE_SEND_NEW, fid, 0, send);
+            postmessage_toxcore(TOX_FILE_SEND_NEW, (uint32_t)fid, 0, send);
             utoxGTK_free(p->data);
             p = p->next;
         }
@@ -229,14 +236,14 @@ static void ugtk_savethread(void *args) {
             char *path = strdup(name);
             // utoxGTK_free(name)
 
-            debug("name: %s\npath: %s\n", name, path);
+            LOG_TRACE("GTK", "name: %s\npath: %s" , name, path);
 
             /* can we really write this file? */
             FILE *fp = fopen(path, "w");
             if (fp == NULL) {
                 /* No, we can't display error, jump to top. */
                 if (errno == EACCES) {
-                    debug("File write permission denied.\n");
+                    LOG_TRACE("GTK", "File write permission denied." );
                     void *errordialog = utoxGTK_message_dialog_new(dialog, 1, 3, 2,
                                                                    // parent, destroy_with_parent,
                                                                    // utoxGTK_error_message, utoxGTK_buttons_close
@@ -246,7 +253,7 @@ static void ugtk_savethread(void *args) {
                     utoxGTK_widget_destroy(dialog);
                     continue;
                 } else {
-                    debug("Unknown file write error...\n");
+                    LOG_TRACE("GTK", "Unknown file write error..." );
                 }
             } else {
                 fclose(fp);
@@ -258,7 +265,7 @@ static void ugtk_savethread(void *args) {
                 break;
             }
         } else if (result == GTK_RESPONSE_CANCEL) {
-            debug("Aborting in progress file...\n");
+            LOG_TRACE("GTK", "Aborting in progress file..." );
         }
         /* catch all */
         utoxGTK_widget_destroy(dialog);
@@ -273,20 +280,28 @@ static void ugtk_savethread(void *args) {
 }
 
 static void ugtk_save_data_thread(void *args) {
-    MSG_FILE *file   = args;
-    void *    dialog = utoxGTK_file_chooser_dialog_new((const char *)S(SAVE_FILE), NULL, GTK_FILE_CHOOSER_ACTION_SAVE,
+    MSG_HEADER *msg = args;
+    void *dialog = utoxGTK_file_chooser_dialog_new((const char *)S(SAVE_FILE), NULL, GTK_FILE_CHOOSER_ACTION_SAVE,
                                                    "_Cancel", GTK_RESPONSE_CANCEL, "_Save", GTK_RESPONSE_ACCEPT, NULL);
-    utoxGTK_file_chooser_set_current_name(dialog, "inline.png");
+    utoxGTK_file_chooser_set_current_name(dialog, msg->via.ft.name);
     int result = utoxGTK_dialog_run(dialog);
     if (result == GTK_RESPONSE_ACCEPT) {
         char *name = utoxGTK_file_chooser_get_filename(dialog);
 
         FILE *fp = fopen(name, "wb");
         if (fp) {
-            fwrite(file->path, file->size, 1, fp);
+            fwrite(msg->via.ft.data, msg->via.ft.data_size, 1, fp);
             fclose(fp);
 
-            snprintf((char *)file->path, UTOX_FILE_NAME_LENGTH, "inline.png");
+            if (!msg->via.ft.path) {
+                msg->via.ft.path_length = strlen(name);
+                msg->via.ft.path = calloc(1, msg->via.ft.path_length + 1);
+            }
+
+            if (msg->via.ft.path) {
+                snprintf((char *)msg->via.ft.path, UTOX_FILE_NAME_LENGTH, "%s", name);
+            }
+            msg->via.ft.inline_png = false;
         }
     }
 
@@ -299,10 +314,15 @@ static void ugtk_save_data_thread(void *args) {
 }
 
 static void ugtk_save_chatlog_thread(void *args) {
-    uint32_t friend_number = *(uint32_t *)args;
+    size_t friend_number = (size_t)args;
+    FRIEND *f = get_friend(friend_number);
+    if (!f) {
+        LOG_ERR("GTK", "Could not get friend with number: %u", friend_number);
+        return;
+    }
 
-    char name[UTOX_MAX_NAME_LENGTH + sizeof(".txt")];
-    snprintf(name, sizeof(name), "%.*s.txt", (int)friend[friend_number].name_length, friend[friend_number].name);
+    char name[TOX_MAX_NAME_LENGTH + sizeof ".txt"];
+    snprintf(name, sizeof name, "%.*s.txt", (int)f->name_length, f->name);
 
     void *dialog = utoxGTK_file_chooser_dialog_new((const char *)S(SAVE_FILE), NULL, GTK_FILE_CHOOSER_ACTION_SAVE,
                                                    "_Cancel", GTK_RESPONSE_CANCEL, "_Save", GTK_RESPONSE_ACCEPT, NULL);
@@ -313,7 +333,7 @@ static void ugtk_save_chatlog_thread(void *args) {
 
         FILE *fp = fopen(file_name, "wb");
         if (fp) {
-            utox_export_chatlog(friend[friend_number].id_str, fp);
+            utox_export_chatlog(f->id_str, fp);
         }
     }
 
@@ -330,7 +350,7 @@ void ugtk_openfilesend(void) {
         return;
     }
     utoxGTK_open = true;
-    FRIEND *f = flist_get_selected()->data;
+    FRIEND *f = flist_get_friend();
     uint32_t number = f->number;
     thread(ugtk_opensendthread, (void*)(size_t)number);
 }
@@ -343,7 +363,7 @@ void ugtk_openfileavatar(void) {
     thread(ugtk_openavatarthread, NULL);
 }
 
-void ugtk_native_select_dir_ft(uint32_t fid, FILE_TRANSFER *file) {
+void ugtk_native_select_dir_ft(uint32_t UNUSED(fid), FILE_TRANSFER *file) {
     if (utoxGTK_open) {
         return;
     }
@@ -351,12 +371,12 @@ void ugtk_native_select_dir_ft(uint32_t fid, FILE_TRANSFER *file) {
     thread(ugtk_savethread, file);
 }
 
-void ugtk_file_save_inline(FILE_TRANSFER *file) {
+void ugtk_file_save_inline(MSG_HEADER *msg) {
     if (utoxGTK_open) {
         return;
     }
     utoxGTK_open = true;
-    thread(ugtk_save_data_thread, file);
+    thread(ugtk_save_data_thread, msg);
 }
 
 void ugtk_save_chatlog(uint32_t friend_number) {
@@ -364,8 +384,10 @@ void ugtk_save_chatlog(uint32_t friend_number) {
         return;
     }
 
+    // We just care about sending a single uint, but we don't want to overflow a buffer
+    size_t fnum = friend_number;
     utoxGTK_open = true;
-    thread(ugtk_save_chatlog_thread, &friend_number);
+    thread(ugtk_save_chatlog_thread, (void *)fnum); // No need to create and pass a pointer for a single u32
 }
 
 /* macro to link and test each of the gtk functions we need.
@@ -375,7 +397,7 @@ void ugtk_save_chatlog(uint32_t friend_number) {
     do {                                                               \
         utoxGTK_##name = dlsym(lib, #trgt "_" #name);                  \
         if (!utoxGTK_##name) {                                         \
-            debug_error("Unable to load " #name " (%s)\n", dlerror()); \
+            LOG_ERR("GTK", "Unable to load " #name " (%s)", dlerror()); \
             dlclose(lib);                                              \
             return NULL;                                               \
         }                                                              \
@@ -385,7 +407,7 @@ void ugtk_save_chatlog(uint32_t friend_number) {
     do {                                                               \
         utoxGDK_##name = dlsym(lib, "gdk_" #name);                     \
         if (!utoxGDK_##name) {                                         \
-            debug_error("Unable to load " #name " (%s)\n", dlerror()); \
+            LOG_ERR("GTK", "Unable to load " #name " (%s)", dlerror()); \
             dlclose(lib);                                              \
             return NULL;                                               \
         }                                                              \
@@ -396,7 +418,7 @@ void *ugtk_load(void) {
     // return NULL;
     void *lib = dlopen(LIBGTK_FILENAME, RTLD_LAZY);
     if (lib) {
-        debug("have GTK\n");
+        LOG_TRACE("GTK", "have GTK" );
 
         U_DLLOAD(gtk, init);
         U_DLLOAD(gtk, main_iteration);

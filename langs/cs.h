@@ -64,10 +64,10 @@ msgstr("Přenos souboru dokončen")
 msgid(CALL_CANCELLED)
 msgstr("Hovor zrušen")
 
-msgid(CALL_INVITED)
+//msgid(CALL_INVITED)
 //msgstr("Call invited")
 
-msgid(CALL_RINGING)
+//msgid(CALL_RINGING)
 //msgstr("Call ringing")
 
 msgid(CALL_STARTED)
@@ -136,7 +136,7 @@ msgstr("Proxy (SOCKS 5)")
 msgid(WARNING)
 msgstr("Změna nastavení sítě/Proxy Vás dočasně odpojí od sítě Tox.")
 
-msgid(LOGGING)
+msgid(SAVE_CHAT_HISTORY)
 msgstr("Logování")
 
 msgid(IS_TYPING)

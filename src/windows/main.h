@@ -18,7 +18,7 @@
 #define WINVER 0x410
 #endif
 
-#include <inttypes.h>
+#include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -26,7 +26,6 @@
 #undef CLEARTYPE_QUALITY
 #define CLEARTYPE_QUALITY 5
 
-// clang-format off
 #define STRSAFE_NO_DEPRECATE
 #include <windows.h>
 #include <windns.h>
@@ -37,21 +36,6 @@
 
 #include <shlobj.h>
 #include <knownfolders.h>
-#include <io.h>
-// clang-format on
-
-#define KEY_BACK VK_BACK
-#define KEY_RETURN VK_RETURN
-#define KEY_LEFT VK_LEFT
-#define KEY_RIGHT VK_RIGHT
-#define KEY_TAB VK_TAB
-#define KEY_DEL VK_DELETE
-#define KEY_END VK_END
-#define KEY_HOME VK_HOME
-#define KEY_UP VK_UP
-#define KEY_DOWN VK_DOWN
-#define KEY_PAGEUP VK_PRIOR
-#define KEY_PAGEDOWN VK_NEXT
 
 #define WM_NOTIFYICON (WM_APP + 0)
 #define WM_TOX (WM_APP + 1)
@@ -66,17 +50,17 @@ enum {
 
 HFONT   font[32];
 HCURSOR cursors[8];
-HICON   my_icon, unread_messages_icon;
+HICON   black_icon, unread_messages_icon;
 
-HWND      hwnd, capturewnd;
-HINSTANCE hinstance;
-HDC       main_hdc, hdc, hdcMem;
-HBRUSH    hdc_brush;
-HBITMAP   hdc_bm;
-HWND      video_hwnd[128]; // todo fixme
+HBRUSH  hdc_brush;
 
-#define NATIVE_IMAGE_IS_VALID(x) (NULL != (x))
-#define NATIVE_IMAGE_HAS_ALPHA(x) (x->has_alpha)
+HWND    video_hwnd[128]; // todo fixme
+HWND    preview_hwnd;    // todo fixme
+
+extern bool flashing;
+extern bool havefocus;
+extern bool hidden;
+
 // internal representation of an image
 typedef struct native_image {
     HBITMAP bitmap; // 32 bit bitmap containing
@@ -93,7 +77,6 @@ typedef struct native_image {
     // stretch mode used when stretching this image, either
     // COLORONCOLOR(ugly and fast), or HALFTONE(prettier and slower)
     int stretch_mode;
-
 } NATIVE_IMAGE;
 
 // static char save_path[280];
@@ -110,12 +93,12 @@ enum {
 
 // TODO move these into os_video.c
 int  video_grab_x, video_grab_y, video_grab_w, video_grab_h;
-bool grabbing;
 
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 /* Included in dnd.c */
 void dnd_init(HWND window);
 
-int native_to_utf8str(wchar_t *str_in, char *str_out, uint32_t max_size);
+// Converts a Windows wide null-terminated string to utf8.
+int native_to_utf8str(const wchar_t *str_in, char *str_out, uint32_t max_size);
 
 #endif

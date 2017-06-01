@@ -5,10 +5,11 @@
 #include <stdint.h>
 #include <stdio.h>
 
-typedef struct file_transfer FILE_TRANSFER;
-
 #define UTOX_FILE_NAME_LENGTH 1024
 
+/**
+ * Options to define behavior when opening files.
+ */
 typedef enum UTOX_FILE_OPTS {
     UTOX_FILE_OPTS_READ   = 1 << 0,
     UTOX_FILE_OPTS_WRITE  = 1 << 1,
@@ -17,10 +18,24 @@ typedef enum UTOX_FILE_OPTS {
     UTOX_FILE_OPTS_DELETE = 1 << 7,
 } UTOX_FILE_OPTS;
 
-void file_save_inline(FILE_TRANSFER *file);
+/**
+ * OS independent way of opening a file from the utox storage folder.
+ *
+ * This function takes care of the environment, checking for portable mode.
+ *
+ * @param name file name, relative to utox storage folder.
+ * @param size size of the file. This variable is written to by the function. Can be NULL if you don't care about the size.
+ * @param opts options to apply when opening the file, see UTOX_FILE_OPTS for available options.
+ * @return open file pointer, or NULL on failure.
+ */
+FILE *utox_get_file(const char *name, size_t *size, UTOX_FILE_OPTS opts);
 
-void native_autoselect_dir_ft(uint32_t fid, FILE_TRANSFER *file);
+/**
+ * TODO DOCUMENTATION
+ */
+bool utox_remove_file(const uint8_t *full_name, size_t length);
 
+bool utox_move_file(const uint8_t *current_name, const uint8_t *new_name);
 
 /**
  * Takes a null-terminated utf8 filepath and creates it with permissions 0700
@@ -31,14 +46,10 @@ void native_autoselect_dir_ft(uint32_t fid, FILE_TRANSFER *file);
  */
 bool native_create_dir(const uint8_t *filepath);
 
-FILE *native_get_file(const uint8_t *name, size_t *size, UTOX_FILE_OPTS opts);
-
-/** given a filename, native_remove_file will delete that file from the local config dir */
-bool native_remove_file(const uint8_t *name, size_t length);
-
-/**
- * TODO DOCUMENTATION
+/* read a whole file from a path,
+ *  on success: returns pointer to data (must be free()'d later), writes size of data to *size if size is not NULL
+ *  on failure: returns NULL
  */
-bool utox_remove_file(const uint8_t *full_name, size_t length);
+void *file_raw(char *path, uint32_t *size);
 
 #endif

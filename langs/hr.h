@@ -169,8 +169,8 @@ msgstr("Nazočan")
 msgid(STATUS_AWAY)
 msgstr("Odsutan")
 
-msgstr("Zauzet")
 msgid(STATUS_BUSY)
+msgstr("Zauzet")
 
 msgid(NOT_CONNECTED)
 msgstr("Nije spojen")
@@ -214,7 +214,7 @@ msgstr("Mreža")
 msgid(WARNING)
 msgstr("Promjena mrežnih/proxy postavki će vas privremeno odspojiti od Tox mreže")
 
-msgid(LOGGING)
+msgid(SAVE_CHAT_HISTORY)
 msgstr("Evidencije")
 
 msgid(AUDIONOTIFICATIONS)

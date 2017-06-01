@@ -1,32 +1,272 @@
 #include "main.h"
 
+#include "screen_grab.h"
+#include "tray.h"
+#include "window.h"
+
 #include "../flist.h"
 #include "../friend.h"
-#include "../logging_native.h"
+#include "../debug.h"
+#include "../macros.h"
+#include "../notify.h"
+#include "../self.h"
+#include "../settings.h"
 #include "../tox.h"
+#include "../ui.h"
 #include "../utox.h"
 
 #include "../av/utox_av.h"
-#include "../ui/edit.h"
 
-// Needed for enddraw. This should probably be changed.
-#include "../ui/draw.h"
+#include "../native/clipboard.h"
+#include "../native/keyboard.h"
+#include "../native/ui.h"
+
+#include "../ui/draw.h" // Needed for enddraw. This should probably be changed.
+#include "../ui/edit.h"
 
 #include "keysym2ucs.h"
 
 #include <assert.h>
 #include <stddef.h>
 
+#include "../layout/friend.h"
+#include "../layout/group.h"
+#include "../layout/settings.h"
+
+
+#include "../main.h" // STBI
+
 extern XIC xic;
+
+static void mouse_move(XMotionEvent *event, UTOX_WINDOW *window) {
+    if (pointergrab) { // TODO super globals are bad mm'kay?
+        GRAB_POS grab = grab_pos();
+        XDrawRectangle(display, RootWindow(display, def_screen_num), scr_grab_window.gc,
+                       MIN(grab.dn_x, grab.up_x), MIN(grab.dn_y, grab.up_y),
+                       grab.dn_x < grab.up_x ? grab.up_x - grab.dn_x : grab.dn_x - grab.up_x,
+                       grab.dn_y < grab.up_y ? grab.up_y - grab.dn_y : grab.dn_y - grab.up_y);
+
+        grab_up(event->x_root, event->y_root);
+        grab = grab_pos();
+
+        XDrawRectangle(display, RootWindow(display, def_screen_num), scr_grab_window.gc,
+                       MIN(grab.dn_x, grab.up_x), MIN(grab.dn_y, grab.up_y),
+                       grab.dn_x < grab.up_x ? grab.up_x - grab.dn_x : grab.dn_x - grab.up_x,
+                       grab.dn_y < grab.up_y ? grab.up_y - grab.dn_y : grab.dn_y - grab.up_y);
+
+        return;
+    }
+
+    static int mx, my;
+    int        dx, dy;
+
+    dx = event->x - mx;
+    dy = event->y - my;
+    mx = event->x;
+    my = event->y;
+
+    cursor = CURSOR_NONE;
+    panel_mmove(window->_.panel, 0, 0, window->_.w, window->_.h, event->x, event->y, dx, dy);
+
+    XDefineCursor(display, window->window, cursors[cursor]);
+
+    // uncomment this to log mouse movements. Commented because it spams too much
+    //LOG_TRACE("XLIB", "MotionEvent: (%u %u) %u", event->x, event->y, event->state);
+}
+
+static void mouse_down(XButtonEvent *event, UTOX_WINDOW *window) {
+    switch (event->button) {
+        case Button1: {
+            if (pointergrab) {
+                grab_up(event->x_root, event->y_root);
+                grab_dn(event->x_root, event->y_root);
+                return;
+            }
+
+            // todo: better double/triple click detect
+            static Time lastclick, lastclick2;
+            panel_mmove(window->_.panel, 0, 0, window->_.w, window->_.h, event->x, event->y, 0, 0);
+            panel_mdown(window->_.panel);
+            if (event->time - lastclick < 300) {
+                bool triclick = (event->time - lastclick2 < 600);
+                panel_dclick(window->_.panel, triclick);
+                if (triclick) {
+                    lastclick = 0;
+                }
+            }
+            lastclick2 = lastclick;
+            lastclick  = event->time;
+            break;
+        }
+
+        case Button3: {
+            if (pointergrab) {
+                XUngrabPointer(display, CurrentTime);
+                pointergrab = 0;
+                break;
+            }
+
+            panel_mright(window->_.panel);
+            break;
+        }
+
+        case Button4: {
+            // TODO: determine precise deltas if possible
+            panel_mwheel(window->_.panel, 0, 0, window->_.w, window->_.h, 1.0, 0);
+            break;
+        }
+
+        case Button5: {
+            // TODO: determine precise deltas if possible
+            panel_mwheel(window->_.panel, 0, 0, window->_.w, window->_.h, -1.0, 0);
+            break;
+        }
+    }
+
+    LOG_TRACE("XLIB", "ButtonEvent: %u %u", event->state, event->button);
+}
+
+static void mouse_up(XButtonEvent *event, UTOX_WINDOW *window) {
+    switch (event->button) {
+        case Button1: {
+            if (pointergrab) {
+                XUngrabPointer(display, CurrentTime);
+                GRAB_POS grab = grab_pos();
+                if (grab.dn_x < grab.up_x) {
+                    grab.up_x -= grab.dn_x;
+                } else {
+                    int w  = grab.dn_x - grab.up_x;
+                    grab.dn_x  = grab.up_x;
+                    grab.up_x = w;
+                }
+
+                if (grab.dn_y < grab.up_y) {
+                    grab.up_y -= grab.dn_y;
+                } else {
+                    int w  = grab.dn_y - grab.up_y;
+                    grab.dn_y  = grab.up_y;
+                    grab.up_y = w;
+                }
+
+                /* enforce min size */
+
+                if (grab.up_x * grab.up_y < 100) {
+                    pointergrab = 0;
+                    break;
+                }
+
+                XDrawRectangle(display, RootWindow(display, def_screen_num), scr_grab_window.gc, grab.dn_x, grab.dn_y, grab.up_x, grab.up_y);
+                if (pointergrab == 1) {
+                    FRIEND *f = flist_get_friend();
+                    if (f && f->online) {
+                        XImage *img = XGetImage(display, RootWindow(display, def_screen_num), grab.dn_x, grab.dn_y, grab.up_x,
+                                                grab.up_y, XAllPlanes(), ZPixmap);
+                        if (img) {
+                            uint8_t * temp, *p;
+                            uint32_t *pp = (void *)img->data, *end = &pp[img->width * img->height];
+                            p = temp = malloc(img->width * img->height * 3);
+                            while (pp != end) {
+                                uint32_t i = *pp++;
+                                *p++       = i >> 16;
+                                *p++       = i >> 8;
+                                *p++       = i;
+                            }
+                            int      size = -1;
+                            uint8_t *out  = stbi_write_png_to_mem(temp, 0, img->width, img->height, 3, &size);
+                            free(temp);
+
+                            uint16_t w = img->width;
+                            uint16_t h = img->height;
+
+                            NATIVE_IMAGE *image = malloc(sizeof(NATIVE_IMAGE));
+                            image->rgb          = ximage_to_picture(img, NULL);
+                            image->alpha        = None;
+                            friend_sendimage(f, image, w, h, (UTOX_IMAGE)out, size);
+                        }
+                    }
+                } else {
+                    postmessage_utoxav(UTOXAV_SET_VIDEO_IN, 1, 0, NULL);
+                }
+                pointergrab = 0;
+            } else {
+                panel_mup(window->_.panel);
+            }
+            break;
+        }
+    }
+    LOG_TRACE("XLIB", "ButtonEvent: %u %u", event->state, event->button);
+}
+
+
+// Should return false if the result of the action should close/exit the window.
+static bool popup_event(XEvent event, UTOX_WINDOW *win) {
+    switch (event.type) {
+        case Expose: {
+            LOG_TRACE("XLIB", "Main window expose");
+            native_window_set_target(win);
+            panel_draw(win->_.panel , 0, 0, win->_.w, win->_.h);
+            XCopyArea(display, win->drawbuf, win->window, win->gc, 0, 0, win->_.w, win->_.h, 0, 0);
+            break;
+        }
+        case ClientMessage: {
+            /* This could be noop code, I'm not convinced we need to support _NET_WM_PING but
+             * in case we do, we already have the response ready.  */
+            Atom ping = XInternAtom(display, "_NET_WM_PING", 0);
+            if ((Atom)event.xclient.data.l[0] == ping) {
+                LOG_TRACE("XLIB", "ping");
+                event.xany.window = root_window;
+                XSendEvent(display, root_window, False, NoEventMask, &event);
+            } else {
+                LOG_TRACE("XLIB", "not ping");
+            }
+            break;
+        }
+        case MotionNotify: {
+            mouse_move(&event.xmotion, win);
+            break;
+        }
+        case ButtonPress: {
+            mouse_down(&event.xbutton, win);
+            break;
+        }
+        case ButtonRelease: {
+            mouse_up(&event.xbutton, win);
+            break;
+        }
+
+        case EnterNotify: {
+            LOG_TRACE("XLIB", "set focus");
+            window_set_focus(win);
+            break;
+        }
+
+        case LeaveNotify: {
+            break;
+        }
+        default: {
+            LOG_WARN("XLIB", "other event: %u", event.type);
+            break;
+        }
+
+    }
+
+    return true;
+}
 
 bool doevent(XEvent event) {
     if (XFilterEvent(&event, None)) {
         return true;
     }
 
-    if (event.xany.window && event.xany.window != window) {
-        if (event.xany.window == tray_window) {
-            tray_window_event(event);
+    if (event.xany.window && event.xany.window != main_window.window) {
+
+        if (native_window_find_notify(&event.xany.window)) {
+            // TODO perhaps we should roll this into one?
+            return popup_event(event, native_window_find_notify(&event.xany.window));
+            // return true;
+        }
+
+        if (tray_window_event(event)) {
             return true;
         }
 
@@ -38,15 +278,14 @@ bool doevent(XEvent event) {
                     return true;
                 }
 
-                int i;
-                for (i = 0; i != countof(friend); i++) {
+                uint32_t i;
+                for (i = 0; i != self.friend_list_count; i++) {
                     if (video_win[i + 1] == ev->window) {
-                        FRIEND *f = &friend[i];
+                        FRIEND *f = get_friend(i);
                         postmessage_utoxav(UTOXAV_STOP_VIDEO, f->number, 0, NULL);
                         break;
                     }
                 }
-                assert(i != countof(friend));
             }
         }
 
@@ -56,7 +295,6 @@ bool doevent(XEvent event) {
     switch (event.type) {
         case Expose: {
             enddraw(0, 0, settings.window_width, settings.window_height);
-            draw_tray_icon();
             break;
         }
 
@@ -65,15 +303,15 @@ bool doevent(XEvent event) {
                 XSetICFocus(xic);
             }
 
-#ifdef UNITY
+            #ifdef UNITY
             if (unity_running) {
                 mm_rm_entry(NULL);
             }
-#endif
+            #endif
 
-            havefocus      = 1;
-            XWMHints hints = { 0 };
-            XSetWMHints(display, window, &hints);
+            havefocus      = true;
+            XWMHints hints = { 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+            XSetWMHints(display, main_window.window, &hints);
             break;
         }
 
@@ -82,33 +320,34 @@ bool doevent(XEvent event) {
                 XUnsetICFocus(xic);
             }
 
-#ifdef UNITY
+            #ifdef UNITY
             if (unity_running) {
                 mm_save_cid();
             }
-#endif
+            #endif
 
-            havefocus = 0;
+            havefocus = false;
             break;
         }
 
         case ConfigureNotify: {
             XConfigureEvent *ev = &event.xconfigure;
-            if (settings.window_width != ev->width || settings.window_height != ev->height) {
+            main_window._.x = ev->x;
+            main_window._.y = ev->y;
+
+            if (settings.window_width != (unsigned)ev->width
+                || settings.window_height != (unsigned)ev->height) {
                 // Resize
 
-                if (ev->width > drawwidth || ev->height > drawheight) {
-                    drawwidth  = ev->width + 10;
-                    drawheight = ev->height + 10;
+                    XFreePixmap(display, main_window.drawbuf);
+                    main_window.drawbuf = XCreatePixmap(display, main_window.window,
+                                            ev->width + 10, ev->height + 10, default_depth);
+                    XRenderFreePicture(display, main_window.renderpic);
+                    main_window.renderpic = XRenderCreatePicture(display, main_window.drawbuf,
+                                                main_window.pictformat, 0, NULL);
 
-                    XFreePixmap(display, drawbuf);
-                    drawbuf = XCreatePixmap(display, window, drawwidth, drawheight, xwin_depth);
-                    XRenderFreePicture(display, renderpic);
-                    renderpic = XRenderCreatePicture(display, drawbuf, pictformat, 0, NULL);
-                }
-
-                settings.window_width  = ev->width;
-                settings.window_height = ev->height;
+                main_window._.w = settings.window_width  = ev->width;
+                main_window._.h = settings.window_height = ev->height;
 
                 ui_size(settings.window_width, settings.window_height);
 
@@ -120,181 +359,21 @@ bool doevent(XEvent event) {
 
         case LeaveNotify: {
             ui_mouseleave();
-            // FIXME: Is it intentional that there is no break here? Who knows.
+            break;
         }
 
         case MotionNotify: {
-            XMotionEvent *ev = &event.xmotion;
-            if (pointergrab) {
-                XDrawRectangle(display, RootWindow(display, screen), grabgc, grabx < grabpx ? grabx : grabpx,
-                               graby < grabpy ? graby : grabpy, grabx < grabpx ? grabpx - grabx : grabx - grabpx,
-                               graby < grabpy ? grabpy - graby : graby - grabpy);
-
-                grabpx = ev->x_root;
-                grabpy = ev->y_root;
-
-                XDrawRectangle(display, RootWindow(display, screen), grabgc, grabx < grabpx ? grabx : grabpx,
-                               graby < grabpy ? graby : grabpy, grabx < grabpx ? grabpx - grabx : grabx - grabpx,
-                               graby < grabpy ? grabpy - graby : graby - grabpy);
-
-                break;
-            }
-
-
-            static int mx, my;
-
-            int dx = ev->x - mx;
-            int dy = ev->y - my;
-            mx = ev->x;
-            my = ev->y;
-
-            cursor = CURSOR_NONE;
-            panel_mmove(&panel_root, 0, 0, settings.window_width, settings.window_height, ev->x, ev->y, dx, dy);
-
-            XDefineCursor(display, window, cursors[cursor]);
-
-            // SetCursor(hand ? cursor_hand : cursor_arrow);
-
-            // debug("MotionEvent: (%u %u) %u\n", ev->x, ev->y, ev->state);
+            mouse_move(&event.xmotion, &main_window);
             break;
         }
 
         case ButtonPress: {
-            XButtonEvent *ev = &event.xbutton;
-            switch (ev->button) {
-                case Button2: {
-                    panel_mdown(&panel_root);
-                    panel_mup(&panel_root);
-
-                    pasteprimary();
-                    break;
-                }
-
-                case Button1: {
-                    if (pointergrab) {
-                        grabpx = grabx = ev->x_root;
-                        grabpy = graby = ev->y_root;
-
-                        // XDrawRectangle(display, RootWindow(display, screen), grabgc, grabx, graby, 0, 0);
-                        break;
-                    }
-
-                    // todo: better double/triple click detect
-                    static Time lastclick, lastclick2;
-                    panel_mmove(&panel_root, 0, 0, settings.window_width, settings.window_height, ev->x, ev->y, 0, 0);
-                    panel_mdown(&panel_root);
-                    if (ev->time - lastclick < 300) {
-                        bool triclick = (ev->time - lastclick2 < 600);
-                        panel_dclick(&panel_root, triclick);
-                        if (triclick) {
-                            lastclick = 0;
-                        }
-                    }
-                    lastclick2 = lastclick;
-                    lastclick  = ev->time;
-                    mdown      = 1;
-                    break;
-                }
-
-                case Button3: {
-                    if (pointergrab) {
-                        XUngrabPointer(display, CurrentTime);
-                        pointergrab = 0;
-                        break;
-                    }
-
-                    panel_mright(&panel_root);
-                    break;
-                }
-
-                case Button4: {
-                    // TODO: determine precise deltas if possible
-                    panel_mwheel(&panel_root, 0, 0, settings.window_width, settings.window_height, 1.0, 0);
-                    break;
-                }
-
-                case Button5: {
-                    // TODO: determine precise deltas if possible
-                    panel_mwheel(&panel_root, 0, 0, settings.window_width, settings.window_height, -1.0, 0);
-                    break;
-                }
-            }
-
-            // debug("ButtonEvent: %u %u\n", ev->state, ev->button);
+            mouse_down(&event.xbutton, &main_window);
             break;
         }
 
         case ButtonRelease: {
-            XButtonEvent *ev = &event.xbutton;
-            switch (ev->button) {
-                case Button1: {
-                    if (pointergrab) {
-                        if (grabx < grabpx) {
-                            grabpx -= grabx;
-                        } else {
-                            int w  = grabx - grabpx;
-                            grabx  = grabpx;
-                            grabpx = w;
-                        }
-
-                        if (graby < grabpy) {
-                            grabpy -= graby;
-                        } else {
-                            int w  = graby - grabpy;
-                            graby  = grabpy;
-                            grabpy = w;
-                        }
-
-                        /* enforce min size */
-
-                        if (grabpx * grabpy < 100) {
-                            pointergrab = 0;
-                            XUngrabPointer(display, CurrentTime);
-                            break;
-                        }
-
-                        XDrawRectangle(display, RootWindow(display, screen), grabgc, grabx, graby, grabpx, grabpy);
-                        XUngrabPointer(display, CurrentTime);
-                        if (pointergrab == 1) {
-                            FRIEND *f = flist_get_selected()->data;
-                            if (flist_get_selected()->item == ITEM_FRIEND && f->online) {
-                                XImage *img = XGetImage(display, RootWindow(display, screen), grabx, graby, grabpx,
-                                                        grabpy, XAllPlanes(), ZPixmap);
-                                if (img) {
-                                    uint8_t * temp, *p;
-                                    uint32_t *pp = (void *)img->data, *end = &pp[img->width * img->height];
-                                    p = temp = malloc(img->width * img->height * 3);
-                                    while (pp != end) {
-                                        uint32_t i = *pp++;
-                                        *p++       = i >> 16;
-                                        *p++       = i >> 8;
-                                        *p++       = i;
-                                    }
-                                    int      size = -1;
-                                    uint8_t *out  = stbi_write_png_to_mem(temp, 0, img->width, img->height, 3, &size);
-                                    free(temp);
-
-                                    uint16_t w = img->width;
-                                    uint16_t h = img->height;
-
-                                    NATIVE_IMAGE *image = malloc(sizeof(NATIVE_IMAGE));
-                                    image->rgb          = ximage_to_picture(img, NULL);
-                                    image->alpha        = None;
-                                    friend_sendimage(f, image, w, h, (UTOX_IMAGE)out, size);
-                                }
-                            }
-                        } else {
-                            postmessage_utoxav(UTOXAV_SET_VIDEO_IN, 1, 0, NULL);
-                        }
-                        pointergrab = 0;
-                    } else {
-                        panel_mup(&panel_root);
-                        mdown = 0;
-                    }
-                    break;
-                }
-            }
-            break;
+            mouse_up(&event.xbutton, &main_window);
         }
 
         case KeyRelease: {
@@ -362,30 +441,30 @@ bool doevent(XEvent event) {
                 if (ev->state & ControlMask) {
                     switch (sym) {
                         case 'v':
-                        case 'V': paste(); return 1;
+                        case 'V': paste(); return true;
                         case 'c':
                         case 'C':
-                        case XK_Insert: copy(0); return 1;
+                        case XK_Insert: copy(0); return true;
                         case 'x':
                         case 'X':
                             copy(0);
                             edit_char(KEY_DEL, 1, 0);
-                            return 1;
+                            return true;
                         case 'w':
                         case 'W':
                             /* Sent ctrl + backspace to active edit */
                             edit_char(KEY_BACK, 1, 4);
-                            return 1;
+                            return true;
                     }
                 }
 
                 if (ev->state & ShiftMask) {
                     switch (sym) {
-                        case XK_Insert: paste(); return 1;
+                        case XK_Insert: paste(); return true;
                         case XK_Delete:
                             copy(0);
                             edit_char(KEY_DEL, 1, 0);
-                            return 1;
+                            return true;
                     }
                 }
 
@@ -416,7 +495,7 @@ bool doevent(XEvent event) {
                         edit_char(buffer[i], (ev->state & 4) != 0, ev->state);
                 }
                 uint32_t key = keysym2ucs(sym);
-                if (key != ~0) {
+                if (key != ~0u) {
                     edit_char(key, (ev->state & 4) != 0, ev->state);
                 } else {
                     edit_char(sym, 1, ev->state);
@@ -425,14 +504,16 @@ bool doevent(XEvent event) {
                 break;
             }
 
-            messages_char(sym);
+            if (messages_char(sym)) {
+                redraw();
+            }
 
             if (ev->state & 4) {
                 if (sym == 'c' || sym == 'C') {
-                    if (flist_get_selected()->item == ITEM_FRIEND) {
+                    if (flist_get_friend()) {
                         clipboard.len = messages_selection(&messages_friend, clipboard.data, sizeof(clipboard.data), 0);
                         setclipboard();
-                    } else if (flist_get_selected()->item == ITEM_GROUP) {
+                    } else if (flist_get_groupchat()) {
                         clipboard.len = messages_selection(&messages_group, clipboard.data, sizeof(clipboard.data), 0);
                         setclipboard();
                     }
@@ -444,8 +525,7 @@ bool doevent(XEvent event) {
         }
 
         case SelectionNotify: {
-
-            debug("SelectionNotify\n");
+            LOG_NOTE("XLib Event", "SelectionNotify" );
 
             XSelectionEvent *ev = &event.xselection;
 
@@ -453,27 +533,32 @@ bool doevent(XEvent event) {
                 break;
             }
 
-            Atom              type;
-            int               format;
+            Atom type;
+            int  format;
+            void *data;
             long unsigned int len, bytes_left;
-            void *            data;
 
-            XGetWindowProperty(display, window, ev->property, 0, ~0L, True, AnyPropertyType, &type, &format, &len,
+            XGetWindowProperty(display, main_window.window, ev->property, 0, ~0L, True, AnyPropertyType, &type, &format, &len,
                                &bytes_left, (unsigned char **)&data);
 
             if (!data) {
                 break;
             }
 
-            debug("Type: %s\n", XGetAtomName(display, type));
-            debug("Property: %s\n", XGetAtomName(display, ev->property));
+            LOG_INFO("Event", "Type: %s" , XGetAtomName(ev->display, type));
+            LOG_INFO("Event", "Property: %s" , XGetAtomName(ev->display, ev->property));
 
             if (ev->property == XA_ATOM) {
                 pastebestformat((Atom *)data, len, ev->selection);
             } else if (ev->property == XdndDATA) {
                 char *path = malloc(len + 1);
                 formaturilist(path, (char *)data, len);
-                postmessage_toxcore(TOX_FILE_SEND_NEW, (FRIEND *)(flist_get_selected()->data) - friend, 0xFFFF, path);
+                FRIEND *f = flist_get_friend();
+                if (!f) {
+                    LOG_ERR("Event", "Could not get selected friend.");
+                    return false;
+                }
+                postmessage_toxcore(TOX_FILE_SEND_NEW, f->number, 0xFFFF, path);
             } else if (type == XA_INCR) {
                 if (pastebuf.data) {
                     /* already pasting something, give up on that */
@@ -485,6 +570,7 @@ bool doevent(XEvent event) {
                 pastebuf.data = malloc(pastebuf.len);
                 /* Deleting the window property triggers incremental paste */
             } else {
+                LOG_ERR("XLib Event", "Type %s || Prop %s ", XGetAtomName(ev->display, type), XGetAtomName(ev->display, ev->property));
                 pastedata(data, type, len, ev->selection == XA_PRIMARY);
             }
 
@@ -496,12 +582,16 @@ bool doevent(XEvent event) {
         case SelectionRequest: {
             XSelectionRequestEvent *ev = &event.xselectionrequest;
 
-            XEvent resp = {.xselection = {.type      = SelectionNotify,
-                                          .property  = ev->property,
-                                          .requestor = ev->requestor,
-                                          .selection = ev->selection,
-                                          .target    = ev->target,
-                                          .time      = ev->time } };
+            XEvent resp = {
+                .xselection = {
+                    .type      = SelectionNotify,
+                    .property  = ev->property,
+                    .requestor = ev->requestor,
+                    .selection = ev->selection,
+                    .target    = ev->target,
+                    .time      = ev->time
+                }
+            };
 
             if (ev->target == XA_UTF8_STRING || ev->target == XA_STRING) {
                 if (ev->selection == XA_PRIMARY) {
@@ -514,9 +604,9 @@ bool doevent(XEvent event) {
             } else if (ev->target == targets) {
                 Atom supported[] = { XA_STRING, XA_UTF8_STRING };
                 XChangeProperty(display, ev->requestor, ev->property, XA_ATOM, 32, PropModeReplace, (void *)&supported,
-                                countof(supported));
+                                COUNTOF(supported));
             } else {
-                debug_notice("XLIB selection request: unknown request\n");
+                LOG_NOTE("XLIB selection request", " unknown request");
                 resp.xselection.property = None;
             }
 
@@ -528,24 +618,24 @@ bool doevent(XEvent event) {
         case PropertyNotify: {
             XPropertyEvent *ev = &event.xproperty;
             if (ev->state == PropertyNewValue && ev->atom == targets && pastebuf.data) {
-                debug("Property changed: %s\n", XGetAtomName(display, ev->atom));
+                LOG_TRACE("Event", "Property changed: %s" , XGetAtomName(display, ev->atom));
 
                 Atom              type;
                 int               format;
                 unsigned long int len, bytes_left;
                 void *            data;
 
-                XGetWindowProperty(display, window, ev->atom, 0, ~0L, True, AnyPropertyType, &type, &format, &len,
+                XGetWindowProperty(display, main_window.window, ev->atom, 0, ~0L, True, AnyPropertyType, &type, &format, &len,
                                    &bytes_left, (unsigned char **)&data);
 
                 if (len == 0) {
-                    debug("Got 0 length data, pasting\n");
+                    LOG_TRACE("Event", "Got 0 length data, pasting" );
                     pastedata(pastebuf.data, type, pastebuf.len, False);
                     pastebuf.data = NULL;
                     break;
                 }
 
-                if (pastebuf.left < len) {
+                if (pastebuf.left > 0 && (unsigned)pastebuf.left < len) {
                     pastebuf.len += len - pastebuf.left;
                     pastebuf.data = realloc(pastebuf.data, pastebuf.len);
                     pastebuf.left = len;
@@ -571,17 +661,17 @@ bool doevent(XEvent event) {
             if (ev->message_type == wm_protocols) {
                 if ((Atom)event.xclient.data.l[0] == wm_delete_window) {
                     if (settings.close_to_tray) {
-                        debug("Closing to tray.\n");
+                        LOG_TRACE("Event", "Closing to tray." );
                         togglehide();
                     } else {
-                        return 0;
+                        return false;
                     }
                 }
                 break;
             }
 
             if (ev->message_type == XdndEnter) {
-                debug("enter\n");
+                LOG_TRACE("Event", "enter" );
             } else if (ev->message_type == XdndPosition) {
                 Window src         = ev->data.l[0];
                 XEvent reply_event = {.xclient = {.type         = ClientMessage,
@@ -589,23 +679,23 @@ bool doevent(XEvent event) {
                                                   .window       = src,
                                                   .message_type = XdndStatus,
                                                   .format       = 32,
-                                                  .data = {.l = { window, 1, 0, 0, XdndActionCopy } } } };
+                                                  .data = {.l = { main_window.window, 1, 0, 0, XdndActionCopy } } } };
 
                 XSendEvent(display, src, 0, 0, &reply_event);
-                // debug("position (version=%u)\n", ev->data.l[1] >> 24);
+                // LOG_TRACE("Event", "position (version=%u)" , ev->data.l[1] >> 24);
             } else if (ev->message_type == XdndStatus) {
-                debug("status\n");
+                LOG_TRACE("Event", "status" );
             } else if (ev->message_type == XdndDrop) {
-                XConvertSelection(display, XdndSelection, XA_STRING, XdndDATA, window, CurrentTime);
-                debug("drop\n");
+                XConvertSelection(display, XdndSelection, XA_STRING, XdndDATA, main_window.window, CurrentTime);
+                LOG_NOTE("XLIB", "Drag was dropped");
             } else if (ev->message_type == XdndLeave) {
-                debug("leave\n");
+                LOG_TRACE("Event", "leave" );
             } else {
-                debug("dragshit\n");
+                LOG_TRACE("Event", "dragshit" );
             }
             break;
         }
     }
 
-    return 1;
+    return true;
 }

@@ -1,17 +1,22 @@
 #import "main.h"
-#import "../logging_native.h"
+
+#import "../debug.h"
 #import "../main.h"
+#import "../settings.h"
+#import "../ui.h"
+
 #import "../ui/draw.h"
 #import "../ui/svg.h"
 
+#import "../layout/background.h"
 
 #ifdef UTOX_COCOA_BRAVE
 #define DRAW_TARGET_CHK()
 #else
-#define DRAW_TARGET_CHK()                                                 \
-    if (!currently_drawing_into_view) {                                   \
-        debug("bug: currently_drawing_into_view is nil in %s", __func__); \
-        abort();                                                          \
+#define DRAW_TARGET_CHK()                                                          \
+    if (!currently_drawing_into_view) {                                            \
+        LOG_ERR("OSX", "bug: currently_drawing_into_view is nil in %s", __func__); \
+        abort();                                                                   \
     }
 #endif
 
@@ -187,7 +192,7 @@ void drawtextwidth(int x, int width, int y, const char *str, uint16_t length) {
     CTLineRef line         = CTLineCreateWithAttributedString(attrString);
     CTLineRef cut_line     = CTLineCreateTruncatedLine(line, width, kCTLineTruncationEnd, ellipse_line);
     if (!cut_line) {
-        debug("warning: space given not enough for drawtextwidth, bailing");
+        LOG_WARN("OSX", "warning: space given not enough for drawtextwidth, bailing");
         goto free_everything;
     }
 
@@ -232,7 +237,7 @@ void drawtextwidth_right(int x, int width, int y, const char *str, uint16_t leng
     CTLineRef line         = CTLineCreateWithAttributedString(attrString);
     CTLineRef cut_line     = CTLineCreateTruncatedLine(line, width, kCTLineTruncationEnd, ellipse_line);
     if (!cut_line) {
-        debug("warning: space given not enough for drawtextwidth, bailing");
+        LOG_WARN("OSX", "warning: space given not enough for drawtextwidth, bailing");
         goto free_everything;
     }
 
@@ -387,7 +392,7 @@ void setscale_fonts(void) {
 }
 
 void setscale(void) {
-    debug("%d", ui_scale);
+    LOG_WARN("OSX", "%d", ui_scale);
     uToxAppDelegate *ad = (uToxAppDelegate *)[NSApplication sharedApplication].delegate;
     float old_scale     = ui_scale;
     // handle OS X retina capability gracefully
@@ -455,14 +460,16 @@ void draw_rect_frame(int x, int y, int width, int height, uint32_t color) {
     DRAW_TARGET_CHK()
 
     CGFloat sz   = currently_drawing_into_view.frame.size.height;
-    CGRect  rect = CGRectInset((CGRect){.origin =
-                                           {
-                                               .x = x, .y = sz - y - height,
-                                           },
-                                       .size =
-                                           {
-                                               .width = width, .height = height,
-                                           } },
+    CGRect  rect = CGRectInset((CGRect){
+                                            .origin = {
+                                                        .x = x,
+                                                        .y = sz - y - height,
+                                            },
+                                            .size = {
+                                                        .width = width,
+                                                        .height = height,
+                                            }
+                                        },
                               0.5, 0.5);
 
     [[currently_drawing_into_view color:color] set];
@@ -473,14 +480,16 @@ void draw_rect_fill(int x, int y, int width, int height, uint32_t color) {
     DRAW_TARGET_CHK()
 
     CGFloat sz   = currently_drawing_into_view.frame.size.height;
-    CGRect  rect = {.origin =
-                       {
-                           .x = x, .y = sz - y - height,
-                       },
-                   .size =
-                       {
-                           .width = width, .height = height,
-                       } };
+    CGRect  rect = {
+                        .origin = {
+                           .x = x,
+                           .y = sz - y - height,
+                        },
+                        .size = {
+                           .width = width,
+                           .height = height,
+                        }
+                    };
 
     [[currently_drawing_into_view color:color] set];
     NSRectFill(rect);
@@ -545,7 +554,7 @@ void enddraw(int x, int y, int width, int height) {}
 void draw_image(const NATIVE_IMAGE *image, int x, int y, uint32_t width, uint32_t height, uint32_t imgx, uint32_t imgy) {
     DRAW_TARGET_CHK()
 
-    // debug("%lu %lu %lf", imgx, imgy, image->scale);
+    // LOG_WARN("OSX", "%lu %lu %lf", imgx, imgy, image->scale);
 
     CGFloat sz   = currently_drawing_into_view.frame.size.height;
     CGRect  rect = {.origin =

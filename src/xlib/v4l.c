@@ -1,17 +1,23 @@
 #include "main.h"
 
-#include "../logging_native.h"
+#include "../debug.h"
+#include "../macros.h"
+#include "../av/video.h" // video super globals
 
-// FIXME: Required for UNUSED()
-#include "../main.h"
+#include <errno.h>
+#include <string.h>
+#include <sys/ioctl.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 int utox_v4l_fd = -1;
 
 #include <sys/mman.h>
-#ifdef __OpenBSD__
-#include <sys/videoio.h>
-#else
+#if defined(__linux__) || defined(__FreeBSD__) //FreeBSD will have the proper includes after installing v4l
 #include <linux/videodev2.h>
+#else //OpenBSD
+#include <sys/videoio.h>
 #endif
 
 #ifndef NO_V4LCONVERT
@@ -58,7 +64,7 @@ bool v4l_init(char *dev_name) {
     utox_v4l_fd = open(dev_name, O_RDWR /* required */ | O_NONBLOCK, 0);
 
     if (-1 == utox_v4l_fd) {
-        debug("Cannot open '%s': %d, %s\n", dev_name, errno, strerror(errno));
+        LOG_TRACE("v4l", "Cannot open '%s': %d, %s" , dev_name, errno, strerror(errno));
         return 0;
     }
 
@@ -69,20 +75,20 @@ bool v4l_init(char *dev_name) {
 
     if (-1 == xioctl(utox_v4l_fd, VIDIOC_QUERYCAP, &cap)) {
         if (EINVAL == errno) {
-            debug("%s is no V4L2 device\n", dev_name);
+            LOG_TRACE("v4l", "%s is no V4L2 device" , dev_name);
         } else {
-            debug("VIDIOC_QUERYCAP error %d, %s\n", errno, strerror(errno));
+            LOG_TRACE("v4l", "VIDIOC_QUERYCAP error %d, %s" , errno, strerror(errno));
         }
         return 0;
     }
 
     if (!(cap.capabilities & V4L2_CAP_VIDEO_CAPTURE)) {
-        debug("%s is no video capture device\n", dev_name);
+        LOG_TRACE("v4l", "%s is no video capture device" , dev_name);
         return 0;
     }
 
     if (!(cap.capabilities & V4L2_CAP_STREAMING)) {
-        debug("%s does not support streaming i/o\n", dev_name);
+        LOG_TRACE("v4l", "%s does not support streaming i/o" , dev_name);
         return 0;
     }
 
@@ -118,7 +124,7 @@ bool v4l_init(char *dev_name) {
     fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 
     if (-1 == xioctl(utox_v4l_fd, VIDIOC_G_FMT, &fmt)) {
-        debug("VIDIOC_S_FMT error %d, %s\n", errno, strerror(errno));
+        LOG_TRACE("v4l", "VIDIOC_S_FMT error %d, %s" , errno, strerror(errno));
         return 0;
     }
 
@@ -131,7 +137,7 @@ bool v4l_init(char *dev_name) {
     video_height            = fmt.fmt.pix.height;
     dest_fmt.fmt.pix.width  = fmt.fmt.pix.width;
     dest_fmt.fmt.pix.height = fmt.fmt.pix.height;
-    debug("Video size: %u %u\n", video_width, video_height);
+    LOG_TRACE("v4l", "Video size: %u %u" , video_width, video_height);
 
 
     /* Buggy driver paranoia. */
@@ -155,16 +161,15 @@ bool v4l_init(char *dev_name) {
 
     if (-1 == xioctl(utox_v4l_fd, VIDIOC_REQBUFS, &req)) {
         if (EINVAL == errno) {
-            debug("%s does not support x i/o\n", dev_name);
+            LOG_TRACE("v4l", "%s does not support x i/o" , dev_name);
         } else {
-            debug("VIDIOC_REQBUFS error %d, %s\n", errno, strerror(errno));
+            LOG_TRACE("v4l", "VIDIOC_REQBUFS error %d, %s" , errno, strerror(errno));
         }
         return 0;
     }
 
     if (req.count < 2) {
-        fprintf(stderr, "Insufficient buffer memory on %s\n", dev_name);
-        exit(EXIT_FAILURE);
+        LOG_FATAL_ERR(EXIT_MALLOC, "v4l", "Insufficient buffer memory on %s", dev_name);
     }
 
     buffers = calloc(req.count, sizeof(*buffers));
@@ -179,7 +184,7 @@ bool v4l_init(char *dev_name) {
         buf.index  = n_buffers;
 
         if (-1 == xioctl(utox_v4l_fd, VIDIOC_QUERYBUF, &buf)) {
-            debug("VIDIOC_QUERYBUF error %d, %s\n", errno, strerror(errno));
+            LOG_TRACE("v4l", "VIDIOC_QUERYBUF error %d, %s" , errno, strerror(errno));
             return 0;
         }
 
@@ -188,7 +193,7 @@ bool v4l_init(char *dev_name) {
                                         MAP_SHARED /* recommended */, utox_v4l_fd, buf.m.offset);
 
         if (MAP_FAILED == buffers[n_buffers].start) {
-            debug("mmap error %d, %s\n", errno, strerror(errno));
+            LOG_TRACE("v4l", "mmap error %d, %s" , errno, strerror(errno));
             return 0;
         }
     }
@@ -196,7 +201,7 @@ bool v4l_init(char *dev_name) {
     /*buffers = calloc(4, sizeof(*buffers));
 
     if (!buffers) {
-        debug("Out of memory\n");
+        LOG_TRACE("v4l", "Out of memory" );
         return 0;
     }
 
@@ -205,7 +210,7 @@ bool v4l_init(char *dev_name) {
         buffers[n_buffers].start = malloc(buffer_size);
 
         if (!buffers[n_buffers].start) {
-            debug("Out of memory\n");
+            LOG_TRACE("v4l", "Out of memory" );
             return 0;
         }
     }*/
@@ -216,7 +221,7 @@ void v4l_close(void) {
     size_t i;
     for (i = 0; i < n_buffers; ++i) {
         if (-1 == munmap(buffers[i].start, buffers[i].length)) {
-            debug("munmap error\n");
+            LOG_TRACE("v4l", "munmap error" );
         }
     }
 
@@ -224,7 +229,7 @@ void v4l_close(void) {
 }
 
 bool v4l_startread(void) {
-    debug("start webcam\n");
+    LOG_TRACE("v4l", "start webcam" );
     size_t i;
     enum v4l2_buf_type type;
 
@@ -239,13 +244,13 @@ bool v4l_startread(void) {
         // buf.length = buffers[i].length;
 
         if (-1 == xioctl(utox_v4l_fd, VIDIOC_QBUF, &buf)) {
-            debug("VIDIOC_QBUF error %d, %s\n", errno, strerror(errno));
+            LOG_TRACE("v4l", "VIDIOC_QBUF error %d, %s" , errno, strerror(errno));
             return 0;
         }
     }
     type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     if (-1 == xioctl(utox_v4l_fd, VIDIOC_STREAMON, &type)) {
-        debug("VIDIOC_STREAMON error %d, %s\n", errno, strerror(errno));
+        LOG_TRACE("v4l", "VIDIOC_STREAMON error %d, %s" , errno, strerror(errno));
         return 0;
     }
 
@@ -253,11 +258,11 @@ bool v4l_startread(void) {
 }
 
 bool v4l_endread(void) {
-    debug("stop webcam\n");
+    LOG_TRACE("v4l", "stop webcam" );
     enum v4l2_buf_type type;
     type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
     if (-1 == xioctl(utox_v4l_fd, VIDIOC_STREAMOFF, &type)) {
-        debug("VIDIOC_STREAMOFF error %d, %s\n", errno, strerror(errno));
+        LOG_TRACE("v4l", "VIDIOC_STREAMOFF error %d, %s" , errno, strerror(errno));
         return 0;
     }
 
@@ -266,7 +271,7 @@ bool v4l_endread(void) {
 
 int v4l_getframe(uint8_t *y, uint8_t *UNUSED(u), uint8_t *UNUSED(v), uint16_t width, uint16_t height) {
     if (width != video_width || height != video_height) {
-        debug("V4L:\twidth/height mismatch %u %u != %u %u\n", width, height, video_width, video_height);
+        LOG_TRACE("V4L", "width/height mismatch %u %u != %u %u" , width, height, video_width, video_height);
         return 0;
     }
 
@@ -288,7 +293,7 @@ int v4l_getframe(uint8_t *y, uint8_t *UNUSED(u), uint8_t *UNUSED(v), uint16_t wi
 
             /* fall through */
 
-            default: debug("VIDIOC_DQBUF error %d, %s\n", errno, strerror(errno)); return -1;
+            default: LOG_TRACE("v4l", "VIDIOC_DQBUF error %d, %s" , errno, strerror(errno)); return -1;
         }
     }
 
@@ -298,7 +303,7 @@ int v4l_getframe(uint8_t *y, uint8_t *UNUSED(u), uint8_t *UNUSED(v), uint16_t wi
             break;
 
     if(i >= n_buffers) {
-        debug("fatal error\n");
+        LOG_TRACE("v4l", "fatal error" );
         return 0;
     }*/
 
@@ -309,7 +314,7 @@ int v4l_getframe(uint8_t *y, uint8_t *UNUSED(u), uint8_t *UNUSED(v), uint16_t wi
     int result = v4lconvert_convert(v4lconvert_data, &fmt, &dest_fmt, data, buf.bytesused, y,
                                     (video_width * video_height * 3) / 2);
     if (result == -1) {
-        debug("v4lconvert_convert error %s\n", v4lconvert_get_error_message(v4lconvert_data));
+        LOG_TRACE("v4l", "v4lconvert_convert error %s" , v4lconvert_get_error_message(v4lconvert_data));
     }
 #else
     if (fmt.fmt.pix.pixelformat == V4L2_PIX_FMT_YUYV) {
@@ -319,7 +324,7 @@ int v4l_getframe(uint8_t *y, uint8_t *UNUSED(u), uint8_t *UNUSED(v), uint16_t wi
 #endif
 
     if (-1 == xioctl(utox_v4l_fd, VIDIOC_QBUF, &buf)) {
-        debug("VIDIOC_QBUF error %d, %s\n", errno, strerror(errno));
+        LOG_TRACE("v4l", "VIDIOC_QBUF error %d, %s" , errno, strerror(errno));
     }
 
 #ifndef NO_V4LCONVERT

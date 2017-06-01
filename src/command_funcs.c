@@ -2,37 +2,37 @@
 
 #include "friend.h"
 #include "groups.h"
-#include "logging_native.h"
+#include "debug.h"
 #include "tox.h"
-#include "util.h"
+#include "macros.h"
 
-// FIXME: Required for UNUSED()
-#include "main.h"
+#include <stdlib.h>
+#include <string.h>
 
 bool slash_send_file(void *object, char *filepath, int UNUSED(arg_length)) {
     if (filepath) {
         FRIEND *f = object;
-        debug("slash_send_file:\tFile path is: %s\n", filepath);
-        postmessage_toxcore(TOX_FILE_SEND_NEW_SLASH, f - friend, 0xFFFF, (void *)filepath);
+        LOG_TRACE("slash_send_file", "File path is: %s" , filepath);
+        postmessage_toxcore(TOX_FILE_SEND_NEW_SLASH, f->number, 0xFFFF, (void *)filepath);
         return true;
     }
 
-    debug_error("slash_send_file:\t filepath was NULL.\n");
+    LOG_ERR("slash_send_file", " filepath was NULL.");
     return false;
 }
 
 bool slash_device(void *object, char *arg, int UNUSED(arg_length)) {
     FRIEND *f =  object;
-    uint8_t id[TOX_FRIEND_ADDRESS_SIZE * 2];
+    uint8_t id[TOX_ADDRESS_SIZE * 2];
     string_to_id(id, arg);
-    void *data = malloc(TOX_FRIEND_ADDRESS_SIZE * sizeof(char));
+    void *data = malloc(TOX_ADDRESS_SIZE * sizeof(char));
 
     if (data) {
-        memcpy(data, id, TOX_FRIEND_ADDRESS_SIZE);
+        memcpy(data, id, TOX_ADDRESS_SIZE);
         postmessage_toxcore(TOX_FRIEND_NEW_DEVICE, f->number, 0, data);
         return true;
     }
-    debug_error("slash_device:\t Could not allocate memory.\n");
+    LOG_ERR("slash_device", " Could not allocate memory.");
     return false;
 }
 
@@ -64,9 +64,9 @@ bool slash_topic(void *object, char *arg, int arg_length) {
     void *d = malloc(arg_length);
     if (d) {
         memcpy(d, arg, arg_length);
-        postmessage_toxcore(TOX_GROUP_SET_TOPIC, (g - group), arg_length, d);
+        postmessage_toxcore(TOX_GROUP_SET_TOPIC, g->number, arg_length, d);
         return true;
     }
-    debug_error("slash_topic:\t Could not allocate memory.\n");
+    LOG_ERR("slash_topic", " Could not allocate memory.");
     return false;
 }

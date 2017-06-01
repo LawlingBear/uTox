@@ -63,7 +63,8 @@ ${TOOLCHAIN}/bin/arm-linux-androideabi-gcc \
     -o ./build/lib/armeabi/libuTox.so \
     --sysroot=$SYSROOT \
     ${PLATFORM_LIBS} \
-    -shared -std=gnu99 -s
+    -DPLATFORM_ANDROID=1 \
+    -shared -s
 
 $AAPT package -f \
     -M ./src/android/AndroidManifest.xml \

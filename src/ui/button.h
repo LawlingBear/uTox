@@ -1,27 +1,32 @@
-#ifndef BUTTON_H
-#define BUTTON_H
+#ifndef UI_BUTTON_H
+#define UI_BUTTON_H
+
+#include "panel.h"
 
 #include "../ui.h"
 
 #include <stdbool.h>
+#include <stdint.h>
 
 typedef struct button BUTTON;
 struct button {
     PANEL panel;
 
-    // Button picture id, top-left aligned/centered respectively.
-    int bm, bm2;
+    /* Button bitmap id,
+     * fill is top-left aligned
+     * icon is centered. */
+    int bm_fill, bm_icon;
 
-    // Width/height of bm2 picture. Used for centering.
-    int bw, bh;
+    // Width & height of bm_icon. Used for centering.
+    int icon_w, icon_h;
 
     // Background RGB color for bm picture, when Idle/Hovered/Pressed respectively.
-    uint32_t c1, // Button normal background colour
-        c2,      // Button hover background colour
-        c3,      // Button active (press) background colour
-        ct1,     // Button contents (text or icon) colour
-        ct2,     // Button contents (text or icon) hover colour
-        cd;
+    uint32_t c1,  // Button normal background color
+             c2,  // Button hover background color
+             c3,  // Button active (press) background color
+             ct1, // Button contents (text or icon) color
+             ct2, // Button contents (text or icon) hover color
+             cd;
 
     MAYBE_I18NAL_STRING button_text;
     MAYBE_I18NAL_STRING tooltip_text;
@@ -29,6 +34,7 @@ struct button {
     bool mouseover, mousedown, disabled, nodraw;
 
     void (*onright)(void); // called when right mouse button goes down
+    void (*on_mdn)(void);
     void (*on_mup)(void);
     void (*update)(BUTTON *b);
 };
@@ -44,4 +50,12 @@ bool button_mwheel(BUTTON *b, int height, double d, bool smooth);
 
 bool button_mleave(BUTTON *b);
 
-#endif
+
+// TODO these may move
+void button_setcolors_success(BUTTON *b);
+void button_setcolors_danger(BUTTON *b);
+void button_setcolors_warning(BUTTON *b);
+void button_setcolors_disabled(BUTTON *b);
+
+
+#endif // UI_BUTTON_H

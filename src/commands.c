@@ -1,11 +1,14 @@
 #include "commands.h"
 
 #include "command_funcs.h"
+#include "debug.h"
 #include "flist.h"
-#include "logging_native.h"
-#include "main.h"
-#include "util.h"
-#include "ui/edits.h"
+#include "tox.h"
+
+#include "layout/friend.h" // TODO, we should try to remove this dependency
+#include "ui/edit.h"
+
+#include <string.h>
 
 struct Command commands[MAX_NUM_CMDS] = {
     { "alias",    5, slash_alias     },
@@ -25,7 +28,7 @@ uint16_t utox_run_command(char *string, uint16_t string_length, char **cmd, char
     uint16_t cmd_length = 0, argument_length = 0;
 
     if (string[0] == '/') { /* Cool it's a command we support! */
-        // debug("command found!\n");
+        // LOG_TRACE("Commands", "command found!" );
         uint16_t i;
         for (i = 0; i < string_length; ++i) {
             if (string[i] == ' ') {
@@ -48,7 +51,7 @@ uint16_t utox_run_command(char *string, uint16_t string_length, char **cmd, char
             *cmd = string + 1;
         }
     } else {
-        // debug("No command found\n"); /* Sad, we don't support this command. */
+        // LOG_TRACE("Commands", "No command found" ); /* Sad, we don't support this command. */
         *argument = string;
         cmd       = NULL;
         return 0;
@@ -57,7 +60,8 @@ uint16_t utox_run_command(char *string, uint16_t string_length, char **cmd, char
     int i = 0;
     while(commands[i].cmd){
         if (commands[i].cmd_length == cmd_length && memcmp(commands[i].cmd, *cmd, cmd_length) == 0) {
-            bool ret = commands[i].func(flist_get_selected()->data, *argument, argument_length);
+            void* object = flist_get_friend() ? (void*)flist_get_friend() : (void*)flist_get_groupchat();
+            bool ret = commands[i].func(object, *argument, argument_length);
             if (ret) {
                 cmd_length = -1;
             }
@@ -72,7 +76,7 @@ uint16_t utox_run_command(char *string, uint16_t string_length, char **cmd, char
 bool g_select_add_friend_later = 0;
 
 void do_tox_url(uint8_t *url_string, int len) {
-    debug("Command: %.*s\n", len, url_string);
+    LOG_TRACE("Commands", "Command: %.*s" , len, url_string);
 
     //! lacks max length checks, writes to inputs even on failure, no notice of failure
     // doesnt reset unset inputs
@@ -86,8 +90,8 @@ void do_tox_url(uint8_t *url_string, int len) {
     }
 
     // wtf??
-    uint8_t * b = (uint8_t *)edit_add_id.data, *a = url_string, *end = url_string + len;
-    uint16_t *l = &edit_add_id.length;
+    uint8_t  *b = (uint8_t *)edit_add_new_friend_id.data, *a = url_string, *end = url_string + len;
+    uint16_t *l = &edit_add_new_friend_id.length;
     *l          = 0;
     while (a != end) {
         switch (*a) {
@@ -112,8 +116,8 @@ void do_tox_url(uint8_t *url_string, int len) {
             case '&': {
                 a++;
                 if (end - a >= 8 && memcmp(a, "message=", 8) == 0) {
-                    b  = (uint8_t *)edit_add_msg.data;
-                    l  = &edit_add_msg.length;
+                    b  = (uint8_t *)edit_add_new_friend_msg.data;
+                    l  = &edit_add_new_friend_msg.length;
                     *l = 0;
                     a += 7;
                 } else {

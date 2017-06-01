@@ -2,12 +2,12 @@
 
 #include "draw.h"
 
-#include "../logging_native.h"
+#include "../debug.h"
+#include "../ui.h"
+#include "../macros.h"
 
 #include <math.h>
-
-// FIXME: Required for UNUSED()
-#include "../main.h"
+#include <stdlib.h>
 
 #define SQRT2 1.41421356237309504880168872420969807856967187537694807317667973799
 
@@ -399,6 +399,8 @@ static void drawgroup(uint8_t *data, int width) {
 }
 
 bool svg_draw(bool needmemory) {
+    static uint8_t *svg_data = NULL;
+
     if (svg_data) {
         free(svg_data);
     }
@@ -458,7 +460,7 @@ bool svg_draw(bool needmemory) {
         return false;
     }
 
-    void *p = svg_data;
+    uint8_t *p = svg_data;
 
     /* Scroll bars top bottom halves */
     drawcircle(p, SCROLL_WIDTH);
@@ -713,10 +715,7 @@ bool svg_draw(bool needmemory) {
     p += BM_CHAT_BUTTON_OVERLAY_WIDTH * BM_CHAT_BUTTON_OVERLAY_HEIGHT;
 
     if (p - svg_data != size) {
-        // Not sure if this is a good idea to comment out,
-        // but it allows me to remove the dependency on ../native_main.h..
-
-        // debug("SVG:\tSVG data size mismatch...\n");
+        LOG_WARN("SVG", "SVG data size mismatch...");
     }
 
     if (!needmemory) {

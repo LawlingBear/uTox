@@ -1,6 +1,12 @@
-#include "main.h"
+#include "freetype.h"
 
-#include "../logging_native.h"
+#include "main.h"
+#include "window.h"
+
+
+#include "../debug.h"
+#include "../macros.h"
+#include "../ui.h"
 
 #define UTOX_FONT_XLIB "Roboto"
 
@@ -18,7 +24,7 @@ Picture loadglyphpic(uint8_t *data, int width, int height, int pitch, bool no_su
     XImage *img;
 
     if (no_subpixel) {
-        pixmap = XCreatePixmap(display, window, width, height, 8);
+        pixmap = XCreatePixmap(display, main_window.window, width, height, 8);
         img    = XCreateImage(display, CopyFromParent, 8, ZPixmap, 0, (char *)data, width, height, 8, 0);
         legc   = XCreateGC(display, pixmap, 0, NULL);
         XPutImage(display, pixmap, legc, img, 0, 0, 0, 0, width, height);
@@ -55,8 +61,8 @@ Picture loadglyphpic(uint8_t *data, int width, int height, int pitch, bool no_su
             } while (--i);
         }
 
-        pixmap = XCreatePixmap(display, window, width, height, xwin_depth);
-        img    = XCreateImage(display, CopyFromParent, xwin_depth, ZPixmap, 0, (char *)rgbx, width, height, 32, 0);
+        pixmap = XCreatePixmap(display, main_window.window, width, height, default_depth);
+        img    = XCreateImage(display, CopyFromParent, default_depth, ZPixmap, 0, (char *)rgbx, width, height, 32, 0);
         legc   = XCreateGC(display, pixmap, 0, NULL);
         XPutImage(display, pixmap, legc, img, 0, 0, 0, 0, width, height);
 
@@ -77,7 +83,7 @@ GLYPH *font_getglyph(FONT *f, uint32_t ch) {
     uint32_t hash = ch % 128;
     GLYPH *  g = f->glyphs[hash], *s = g;
     if (g) {
-        while (g->ucs4 != ~0) {
+        while (g->ucs4 != ~0u) {
             if (g->ucs4 == ch) {
                 return g;
             }
@@ -151,7 +157,7 @@ GLYPH *font_getglyph(FONT *f, uint32_t ch) {
 
         if (!i->face) {
             // something went wrong
-            debug("???\n");
+            LOG_TRACE("Freetype", "???" );
             return NULL;
         }
     }
@@ -249,7 +255,7 @@ GLYPH *font_getglyph(FONT *f, uint32_t ch) {
         no_subpixel = 0;
     }
 
-    // debug("%u %u %u %u %C\n", PIXELS(i->face->size->metrics.height), g->width, g->height, p->bitmap.pitch, ch);
+    // LOG_TRACE("Freetype", "%u %u %u %u %C" , PIXELS(i->face->size->metrics.height), g->width, g->height, p->bitmap.pitch, ch);
     g->pic = loadglyphpic(p->bitmap.buffer, g->width, g->height, p->bitmap.pitch, no_subpixel, vert, ft_swap_blue_red);
 
     return g;
@@ -258,11 +264,12 @@ GLYPH *font_getglyph(FONT *f, uint32_t ch) {
 void initfonts(void) {
     if (!FcInit()) {
         // error
+        LOG_ERR("Freetype", "FcInit failed.");
     }
 
     FT_Init_FreeType(&ftlib);
 
-    FcResult   result;
+    FcResult result;
     FcPattern *pat = FcPatternCreate();
     FcPatternAddString(pat, FC_FAMILY, (uint8_t *)UTOX_FONT_XLIB);
     FcConfigSubstitute(0, pat, FcMatchPattern);
@@ -329,7 +336,7 @@ static void font_info_open(FONT_INFO *i, FcPattern *pattern) {
     FcPatternGetInteger(pattern, FC_INDEX, 0, &id);
     FcPatternGetCharSet(pattern, FC_CHARSET, 0, &i->cs);
     if (FcPatternGetMatrix(pattern, FC_MATRIX, 0, &font_matrix) == FcResultMatch) {
-        debug("has a matrix\n");
+        LOG_TRACE("Freetype", "has a matrix" );
     }
 
     FcPatternGetDouble(pattern, FC_PIXEL_SIZE, 0, &size);
@@ -337,17 +344,17 @@ static void font_info_open(FONT_INFO *i, FcPattern *pattern) {
     int ft_error = FT_New_Face(ftlib, (char *)filename, id, &i->face);
 
     if (ft_error != 0) {
-        debug("Freetype error %u %s %i\n", ft_error, filename, id);
+        LOG_TRACE("Freetype", "Freetype error %u %s %i" , ft_error, filename, id);
         return;
     }
 
     ft_error = FT_Set_Char_Size(i->face, (size * 64.0 + 0.5), (size * 64.0 + 0.5), 0, 0);
     if (ft_error != 0) {
-        debug("Freetype error %u %lf\n", ft_error, size);
+        LOG_TRACE("Freetype", "Freetype error %u %lf" , ft_error, size);
         return;
     }
 
-    // debug("Loaded font %s %u %i %i\n", filename, id, PIXELS(i->face->ascender), PIXELS(i->face->descender));
+    // LOG_TRACE("Freetype", "Loaded font %s %u %i %i" , filename, id, PIXELS(i->face->ascender), PIXELS(i->face->descender));
 }
 
 static bool font_open(FONT *a_font, ...) {
@@ -378,15 +385,15 @@ static bool font_open(FONT *a_font, ...) {
 }
 
 void loadfonts(void) {
-    int render_order = XRenderQuerySubpixelOrder(display, screen);
+    int render_order = XRenderQuerySubpixelOrder(display, def_screen_num);
     if (render_order == SubPixelHorizontalBGR || render_order == SubPixelVerticalBGR) {
         ft_swap_blue_red = 1;
-        debug("ft_swap_blue_red\n");
+        LOG_TRACE("Freetype", "ft_swap_blue_red" );
     }
 
     if (render_order == SubPixelVerticalBGR || render_order == SubPixelVerticalRGB) {
         ft_vert = 1;
-        debug("ft_vert\n");
+        LOG_TRACE("Freetype", "ft_vert" );
     }
 
     font_open(&font[FONT_TEXT], FC_FAMILY, FcTypeString, UTOX_FONT_XLIB, FC_PIXEL_SIZE, FcTypeDouble, UI_FSCALE(12.0),
@@ -414,7 +421,7 @@ void loadfonts(void) {
 }
 
 void freefonts(void) {
-    for (size_t i = 0; i < countof(font); i++) {
+    for (size_t i = 0; i < COUNTOF(font); i++) {
         FONT *f = &font[i];
         if (f->pattern) {
             FcPatternDestroy(f->pattern);
@@ -429,10 +436,10 @@ void freefonts(void) {
             free(f->info);
         }
 
-        for (size_t j = 0; j < countof(f->glyphs); j++) {
+        for (size_t j = 0; j < COUNTOF(f->glyphs); j++) {
             GLYPH *g = f->glyphs[j];
             if (g) {
-                while (g->ucs4 != ~0) {
+                while (g->ucs4 != ~0u) {
                     if (g->pic) {
                         XRenderFreePicture(display, g->pic);
                     }

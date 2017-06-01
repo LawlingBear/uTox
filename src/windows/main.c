@@ -1,35 +1,48 @@
 #include "main.h"
 
+#include "notify.h"
+#include "screen_grab.h"
+#include "window.h"
+
+#include "../avatar.h"
 #include "../commands.h"
+#include "../debug.h"
 #include "../file_transfers.h"
 #include "../filesys.h"
 #include "../flist.h"
 #include "../friend.h"
-#include "../logging_native.h"
+#include "../macros.h"
 #include "../main.h"
+#include "../self.h"
+#include "../settings.h"
+#include "../text.h"
 #include "../theme.h"
 #include "../tox.h"
-#include "../util.h"
+#include "../ui.h"
+#include "../updater.h"
 #include "../utox.h"
 
 #include "../av/utox_av.h"
-#include "../ui/dropdowns.h"
+
+#include "../native/os.h"
+#include "../native/filesys.h"
+
 #include "../ui/draw.h"
+#include "../ui/dropdown.h"
 #include "../ui/edit.h"
 #include "../ui/svg.h"
 
+#include "../layout/background.h" // TODO do we want to remove this?
+#include "../layout/friend.h"
+#include "../layout/group.h"
+#include "../layout/settings.h" // TODO remove, in for dropdown.lang
+
 #include <windowsx.h>
+#include <io.h>
 
-static bool flashing, desktopgrab_video;
-static bool hidden;
-
-static TRACKMOUSEEVENT tme           = { sizeof(TRACKMOUSEEVENT), TME_LEAVE, 0, 0 };
-static bool            mouse_tracked = false;
-
-bool  draw      = false;
-float scale     = 1.0;
-bool  connected = false;
-bool  havefocus;
+bool flashing = false;
+bool havefocus = true;
+bool hidden = false;
 
 /** Translate a char* from UTF-8 encoding to OS native;
  *
@@ -37,153 +50,166 @@ bool  havefocus;
  * Returns: number of chars writen, or 0 on failure.
  *
  */
-static int utf8tonative(char *str, wchar_t *out, int length) {
+static int utf8tonative(const char *str, wchar_t *out, int length) {
     return MultiByteToWideChar(CP_UTF8, 0, (char *)str, length, out, length);
 }
 
-static int utf8_to_nativestr(char *str, wchar_t *out, int length) {
+static int utf8_to_nativestr(const char *str, wchar_t *out, int length) {
     /* must be null terminated string                   ↓ */
     return MultiByteToWideChar(CP_UTF8, 0, (char *)str, -1, out, length);
 }
 
 /** Open system file browser dialog */
 void openfilesend(void) {
-    char *filepath = calloc(10, UTOX_FILE_NAME_LENGTH); /* lets pick 10 as the number of files we want to work with. */
+    char *filepath = calloc(1, UTOX_FILE_NAME_LENGTH);
     if (filepath == NULL) {
-        debug_error("Windows:\t Could not allocate memory for path.\n");
+        LOG_ERR("Windows", " Could not allocate memory for path.");
         return;
     }
 
     wchar_t dir[UTOX_FILE_NAME_LENGTH];
-    GetCurrentDirectoryW(countof(dir), dir);
+    GetCurrentDirectoryW(COUNTOF(dir), dir);
 
     OPENFILENAME ofn = {
         .lStructSize = sizeof(OPENFILENAME),
-        .hwndOwner   = hwnd,
+        .hwndOwner   = main_window.window,
         .lpstrFile   = filepath,
-        .nMaxFile    = UTOX_FILE_NAME_LENGTH * 10,
-        .Flags       = OFN_EXPLORER | OFN_ALLOWMULTISELECT | OFN_FILEMUSTEXIST,
+        .nMaxFile    = UTOX_FILE_NAME_LENGTH,
+        .Flags       = OFN_EXPLORER | OFN_FILEMUSTEXIST,
     };
 
     if (GetOpenFileName(&ofn)) {
-        FRIEND *f = flist_get_selected()->data;
-        postmessage_toxcore(TOX_FILE_SEND_NEW, f->number, ofn.nFileOffset, filepath);
-    } else {
-        debug_error("GetOpenFileName() failed\n");
-    }
+        FRIEND *f = flist_get_friend();
+        if (!f) {
+            LOG_ERR("Windows", "Unable to get friend for file send msg.");
+            return;
+        }
 
+        UTOX_MSG_FT *msg = calloc(1, sizeof(UTOX_MSG_FT));
+        if (!msg) {
+            LOG_ERR("Windows", "Unable to calloc for file send msg.");
+            return;
+        }
+
+        msg->file = fopen(filepath, "rb");
+        msg->name = (uint8_t *)filepath;
+
+        postmessage_toxcore(TOX_FILE_SEND_NEW, f->number, 0, msg);
+    } else {
+        LOG_ERR("Windows", "GetOpenFileName() failed.");
+    }
     SetCurrentDirectoryW(dir);
 }
 
 void openfileavatar(void) {
-    char *filepath = malloc(UTOX_FILE_NAME_LENGTH);
-    filepath[0]    = 0;
+    char *filepath = calloc(1, UTOX_FILE_NAME_LENGTH);
+    if (!filepath) {
+        LOG_ERR("openfileavatar", "Could not allocate memory for path.");
+        return;
+    }
 
     wchar_t dir[UTOX_FILE_NAME_LENGTH];
-    GetCurrentDirectoryW(countof(dir), dir);
+    GetCurrentDirectoryW(COUNTOF(dir), dir);
 
     OPENFILENAME ofn = {
         .lStructSize = sizeof(OPENFILENAME),
-        .lpstrFilter = "Supported Images\0*.GIF;*.PNG;*.JPG;*.JPEG" /* TODO: add all the supported types */
+        .lpstrFilter = "Supported Images\0*.GIF;*.PNG;*.JPG;*.JPEG" // TODO: add all the supported types.
                        "All Files\0*.*\0"
                        "GIF Files\0*.GIF\0"
                        "PNG Files\0*.PNG\0"
                        "JPG Files\0*.JPG;*.JPEG\0"
                        "\0",
-        .hwndOwner = hwnd,
+        .hwndOwner = main_window.window,
         .lpstrFile = filepath,
         .nMaxFile  = UTOX_FILE_NAME_LENGTH,
         .Flags     = OFN_EXPLORER | OFN_FILEMUSTEXIST,
     };
 
     while (1) { // loop until we have a good file or the user closed the dialog
-        if (GetOpenFileName(&ofn)) {
-            uint32_t size;
-
-            void *file_data = file_raw(filepath, &size);
-            if (!file_data) {
-                MessageBox(NULL, (const char *)S(CANT_FIND_FILE_OR_EMPTY), NULL, MB_ICONWARNING);
-            } else if (size > UTOX_AVATAR_MAX_DATA_LENGTH) {
-                free(file_data);
-                char message[1024];
-                if (sizeof(message) < SLEN(AVATAR_TOO_LARGE_MAX_SIZE_IS) + 16) {
-                    debug("error: AVATAR_TOO_LARGE message is larger than allocated buffer(%zu bytes)\n",
-                          sizeof(message));
-                    break;
-                }
-                // create message containing text that selected avatar is too large and what the max size is
-                int len = sprintf((char *)message, "%.*s", SLEN(AVATAR_TOO_LARGE_MAX_SIZE_IS),
-                                  S(AVATAR_TOO_LARGE_MAX_SIZE_IS));
-                len += sprint_humanread_bytes(message + len, sizeof(message) - len, UTOX_AVATAR_MAX_DATA_LENGTH);
-                message[len++] = '\0';
-                MessageBox(NULL, (char *)message, NULL, MB_ICONWARNING);
-            } else {
-                postmessage_utox(SELF_AVATAR_SET, size, 0, file_data);
-                break;
-            }
-        } else {
-            debug("GetOpenFileName() failed when trying to grab an avatar.\n");
+        if (!GetOpenFileName(&ofn)) {
+            LOG_TRACE("NATIVE", "GetOpenFileName() failed when trying to grab an avatar.");
             break;
         }
+
+        int width, height, bpp, size;
+        uint8_t *file_data = stbi_load(filepath, &width, &height, &bpp, 0);
+        uint8_t *img = stbi_write_png_to_mem(file_data, 0, width, height, bpp, &size);
+        free(file_data);
+
+        if (!img) {
+            MessageBox(NULL, (const char *)S(CANT_FIND_FILE_OR_EMPTY), NULL, MB_ICONWARNING);
+            continue;
+        }
+
+        if (size > UTOX_AVATAR_MAX_DATA_LENGTH) {
+            free(img);
+            char message[1024];
+            if (sizeof(message) < (unsigned)SLEN(AVATAR_TOO_LARGE_MAX_SIZE_IS) + 16) {
+                LOG_ERR("NATIVE", "AVATAR_TOO_LARGE message is larger than allocated buffer(%"PRIu64" bytes)\n",
+                      sizeof(message));
+                break;
+            }
+
+            // create message containing text that selected avatar is too large and what the max size is
+            int len = sprintf(message, "%.*s", SLEN(AVATAR_TOO_LARGE_MAX_SIZE_IS),
+                              S(AVATAR_TOO_LARGE_MAX_SIZE_IS));
+            len += sprint_humanread_bytes(message + len, sizeof(message) - len, UTOX_AVATAR_MAX_DATA_LENGTH);
+            message[len++] = '\0';
+
+            MessageBox(NULL, message, NULL, MB_ICONWARNING);
+            continue;
+        }
+
+        postmessage_utox(SELF_AVATAR_SET, size, 0, img);
+        break;
     }
 
     free(filepath);
     SetCurrentDirectoryW(dir);
 }
 
-void file_save_inline(FILE_TRANSFER *file) {
-    char *path = malloc(UTOX_FILE_NAME_LENGTH);
-    if (path == NULL) {
-        debug("file_save_inline:\t Could not allocate memory for path.\n");
-        return;
+void file_save_inline_image_png(MSG_HEADER *msg) {
+    char *path = calloc(1, UTOX_FILE_NAME_LENGTH);
+    if (!path) {
+        LOG_FATAL_ERR(EXIT_MALLOC, "file_save_inline_image_png", "Could not allocate memory for path.");
     }
-    strcpy(path, file->path);
-    path[file->name_length] = 0;
+
+    snprintf(path, UTOX_FILE_NAME_LENGTH, "%.*s", (int)msg->via.ft.name_length, (char *)msg->via.ft.name);
 
     OPENFILENAME ofn = {
-        .lStructSize = sizeof(OPENFILENAME),
-        .hwndOwner   = hwnd,
-        .lpstrFile   = path,
-        .nMaxFile    = UTOX_FILE_NAME_LENGTH,
-        .Flags       = OFN_EXPLORER | OFN_NOCHANGEDIR | OFN_NOREADONLYRETURN | OFN_OVERWRITEPROMPT,
+        .lStructSize    = sizeof(OPENFILENAME),
+        .hwndOwner      = main_window.window,
+        .lpstrFile      = path,
+        .nMaxFile       = UTOX_FILE_NAME_LENGTH,
+        .lpstrDefExt    = "png",
+        .nFileExtension = strlen(path) - 3,
+        .Flags          = OFN_EXPLORER | OFN_NOCHANGEDIR | OFN_NOREADONLYRETURN | OFN_OVERWRITEPROMPT,
     };
 
     if (GetSaveFileName(&ofn)) {
         FILE *fp = fopen(path, "wb");
         if (fp) {
-            fwrite(file->via.memory, file->target_size, 1, fp);
+            fwrite(msg->via.ft.data, msg->via.ft.data_size, 1, fp);
             fclose(fp);
 
-            snprintf((char *)file->path, UTOX_FILE_NAME_LENGTH, "inline.png");
+            snprintf((char *)msg->via.ft.path, UTOX_FILE_NAME_LENGTH, "%s", path);
+            msg->via.ft.inline_png = false;
+        } else {
+            LOG_ERR("NATIVE", "file_save_inline_image_png:\tCouldn't open path: `%s` to save inline file.", path);
         }
     } else {
-        debug("GetSaveFileName() failed\n");
+        LOG_ERR("NATIVE", "GetSaveFileName() failed");
     }
+
     free(path);
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-int native_to_utf8str(wchar_t *str_in, char *str_out, uint32_t max_size) {
-    /* must be null terminated string          ↓                     */
+int native_to_utf8str(const wchar_t *str_in, char *str_out, uint32_t max_size) {
     return WideCharToMultiByte(CP_UTF8, 0, str_in, -1, str_out, max_size, NULL, NULL);
 }
 
 void postmessage_utox(UTOX_MSG msg, uint16_t param1, uint16_t param2, void *data) {
-    PostMessage(hwnd, WM_TOX + (msg), ((param1) << 16) | (param2), (LPARAM)data);
+    PostMessage(main_window.window, WM_TOX + (msg), ((param1) << 16) | (param2), (LPARAM)data);
 }
 
 void init_ptt(void) {
@@ -192,17 +218,15 @@ void init_ptt(void) {
 
 bool check_ptt_key(void) {
     if (!settings.push_to_talk) {
-        // debug("PTT is disabled\n");
-        return true; /* If push to talk is disabled, return true. */
+        // PTT is disabled. Always send audio.
+        return true;
     }
 
     if (GetAsyncKeyState(VK_LCONTROL)) {
-        // debug("PTT key is down\n");
         return true;
-    } else {
-        // debug("PTT key is up\n");
-        return false;
     }
+
+    return false;
 }
 
 void exit_ptt(void) {
@@ -222,63 +246,47 @@ uint64_t get_time(void) {
 }
 
 void openurl(char *str) {
-    //! convert
-    ShellExecute(NULL, "open", (char *)str, NULL, NULL, SW_SHOW);
+    ShellExecute(NULL, "open", str, NULL, NULL, SW_SHOW);
 }
 
-void setselection(char *data, uint16_t length) {}
+void setselection(char *UNUSED(data), uint16_t UNUSED(length)) {
+    // TODO: Implement.
+}
 
-/** Toggles the main window to/from hidden to tray/shown. */
-void togglehide(int show) {
-    if (hidden || show) {
-        ShowWindow(hwnd, SW_RESTORE);
-        SetForegroundWindow(hwnd);
-        redraw();
-        hidden = false;
+void copy(int value) {
+    const uint16_t max_size = INT16_MAX + 1;
+    char data[max_size]; //! TODO: De-hardcode this value.
+    int len = 0;
+
+    if (edit_active()) {
+        len = edit_copy(data, max_size - 1);
+        data[len] = 0;
+    } else if (flist_get_friend()) {
+        len = messages_selection(&messages_friend, data, max_size, value);
+    } else if (flist_get_groupchat()) {
+        len = messages_selection(&messages_group, data, max_size, value);
     } else {
-        ShowWindow(hwnd, SW_HIDE);
-        hidden = true;
+        return;
     }
+
+    HGLOBAL  hMem = GlobalAlloc(GMEM_MOVEABLE, (len + 1) * 2);
+    wchar_t *d    = GlobalLock(hMem);
+    utf8tonative(data, d, len + 1); // because data is nullterminated
+    GlobalUnlock(hMem);
+    OpenClipboard(main_window.window);
+    EmptyClipboard();
+    SetClipboardData(CF_UNICODETEXT, hMem);
+    CloseClipboard();
 }
 
-/** Right click context menu for the tray icon */
-void ShowContextMenu(void) {
-    POINT pt;
-    GetCursorPos(&pt);
-    HMENU hMenu = CreatePopupMenu();
-    if (hMenu) {
-        InsertMenu(hMenu, -1, MF_BYPOSITION, TRAY_SHOWHIDE, hidden ? "Restore" : "Hide");
-
-        InsertMenu(hMenu, -1, MF_BYPOSITION | MF_SEPARATOR, 0, NULL);
-
-        InsertMenu(hMenu, -1, MF_BYPOSITION | ((self.status == TOX_USER_STATUS_NONE) ? MF_CHECKED : 0),
-                   TRAY_STATUS_AVAILABLE, "Available");
-        InsertMenu(hMenu, -1, MF_BYPOSITION | ((self.status == TOX_USER_STATUS_AWAY) ? MF_CHECKED : 0),
-                   TRAY_STATUS_AWAY, "Away");
-        InsertMenu(hMenu, -1, MF_BYPOSITION | ((self.status == TOX_USER_STATUS_BUSY) ? MF_CHECKED : 0),
-                   TRAY_STATUS_BUSY, "Busy");
-
-        InsertMenu(hMenu, -1, MF_BYPOSITION | MF_SEPARATOR, 0, NULL);
-
-        InsertMenu(hMenu, -1, MF_BYPOSITION, TRAY_EXIT, "Exit");
-
-        // note:    must set window to the foreground or the
-        //          menu won't disappear when it should
-        SetForegroundWindow(hwnd);
-
-        TrackPopupMenu(hMenu, TPM_BOTTOMALIGN, pt.x, pt.y, 0, hwnd, NULL);
-        DestroyMenu(hMenu);
-    }
-}
-
-// creates an UTOX_NATIVE image based on given arguments
-// image should be freed with image_free
+/* TODO DRY, this exists in screen_grab.c */
 static NATIVE_IMAGE *create_utox_image(HBITMAP bmp, bool has_alpha, uint32_t width, uint32_t height) {
-    NATIVE_IMAGE *image = malloc(sizeof(NATIVE_IMAGE));
-    if (image == NULL) {
-        debug("create_utox_image:\t Could not allocate memory for image.\n");
+    NATIVE_IMAGE *image = calloc(1, sizeof(NATIVE_IMAGE));
+    if (!image) {
+        LOG_ERR("create_utox_image", " Could not allocate memory for image." );
         return NULL;
     }
+
     image->bitmap        = bmp;
     image->has_alpha     = has_alpha;
     image->width         = width;
@@ -290,28 +298,34 @@ static NATIVE_IMAGE *create_utox_image(HBITMAP bmp, bool has_alpha, uint32_t wid
     return image;
 }
 
+/* TODO DRY, this exists in screen_grab.c */
 static void sendbitmap(HDC mem, HBITMAP hbm, int width, int height) {
-    if (width == 0 || height == 0)
+    if (width == 0 || height == 0) {
         return;
+    }
 
-    BITMAPINFO info = {.bmiHeader = {
-                           .biSize        = sizeof(BITMAPINFOHEADER),
-                           .biWidth       = width,
-                           .biHeight      = -(int)height,
-                           .biPlanes      = 1,
-                           .biBitCount    = 24,
-                           .biCompression = BI_RGB,
-                       } };
+    BITMAPINFO info = {
+        .bmiHeader = {
+            .biSize        = sizeof(BITMAPINFOHEADER),
+            .biWidth       = width,
+            .biHeight      = -(int)height,
+            .biPlanes      = 1,
+            .biBitCount    = 24,
+            .biCompression = BI_RGB,
+        }
+    };
 
-    void *bits = malloc((width + 3) * height * 3);
+    void *bits = calloc(1, (width + 3) * height * 3);
 
     GetDIBits(mem, hbm, 0, height, bits, &info, DIB_RGB_COLORS);
 
-    uint8_t pbytes = width & 3, *p = bits, *pp = bits, *end = p + width * height * 3;
-    // uint32_t offset = 0;
+    uint8_t pbytes = width & 3;
+    uint8_t *p = bits;
+    uint8_t *pp = bits;
+    uint8_t *end = p + width * height * 3;
+
     while (p != end) {
-        int i;
-        for (i = 0; i != width; i++) {
+        for (int i = 0; i != width; i++) {
             uint8_t b    = pp[i * 3];
             p[i * 3]     = pp[i * 3 + 2];
             p[i * 3 + 1] = pp[i * 3 + 1];
@@ -321,37 +335,13 @@ static void sendbitmap(HDC mem, HBITMAP hbm, int width, int height) {
         pp += width * 3 + pbytes;
     }
 
-    int      size = 0;
-    uint8_t *out  = stbi_write_png_to_mem(bits, 0, width, height, 3, &size);
+    int size = 0;
+
+    UTOX_IMAGE out = stbi_write_png_to_mem(bits, 0, width, height, 3, &size);
     free(bits);
 
     NATIVE_IMAGE *image = create_utox_image(hbm, 0, width, height);
-    friend_sendimage(flist_get_selected()->data, image, width, height, (UTOX_IMAGE)out, size);
-}
-
-void copy(int value) {
-    char data[32768]; //! TODO: De-hardcode this value.
-    int  len;
-
-    if (edit_active()) {
-        len       = edit_copy(data, 32767);
-        data[len] = 0;
-    } else if (flist_get_selected()->item == ITEM_FRIEND) {
-        len = messages_selection(&messages_friend, data, 32768, value);
-    } else if (flist_get_selected()->item == ITEM_GROUP) {
-        len = messages_selection(&messages_group, data, 32768, value);
-    } else {
-        return;
-    }
-
-    HGLOBAL  hMem = GlobalAlloc(GMEM_MOVEABLE, (len + 1) * 2);
-    wchar_t *d    = GlobalLock(hMem);
-    utf8tonative(data, d, len + 1); // because data is nullterminated
-    GlobalUnlock(hMem);
-    OpenClipboard(hwnd);
-    EmptyClipboard();
-    SetClipboardData(CF_UNICODETEXT, hMem);
-    CloseClipboard();
+    friend_sendimage(flist_get_friend(), image, width, height, out, size);
 }
 
 void paste(void) {
@@ -359,33 +349,32 @@ void paste(void) {
     HANDLE h = GetClipboardData(CF_UNICODETEXT);
     if (!h) {
         h = GetClipboardData(CF_BITMAP);
-        if (h && flist_get_selected()->item == ITEM_FRIEND) {
-            FRIEND *f = flist_get_selected()->data;
+        if (h && flist_get_friend()) {
+            FRIEND *f = flist_get_friend();
             if (!f->online) {
                 return;
             }
-            HBITMAP copy;
+
             BITMAP  bm;
-            HDC     tempdc;
             GetObject(h, sizeof(bm), &bm);
 
-            tempdc = CreateCompatibleDC(NULL);
+            HDC tempdc = CreateCompatibleDC(NULL);
             SelectObject(tempdc, h);
 
-            copy = CreateCompatibleBitmap(hdcMem, bm.bmWidth, bm.bmHeight);
-            SelectObject(hdcMem, copy);
-            BitBlt(hdcMem, 0, 0, bm.bmWidth, bm.bmHeight, tempdc, 0, 0, SRCCOPY);
+            HBITMAP copy = CreateCompatibleBitmap(main_window.mem_DC, bm.bmWidth, bm.bmHeight);
+            SelectObject(main_window.mem_DC, copy);
+            BitBlt(main_window.mem_DC, 0, 0, bm.bmWidth, bm.bmHeight, tempdc, 0, 0, SRCCOPY);
 
-            sendbitmap(hdcMem, copy, bm.bmWidth, bm.bmHeight);
+            sendbitmap(main_window.mem_DC, copy, bm.bmWidth, bm.bmHeight);
 
             DeleteDC(tempdc);
         }
     } else {
         wchar_t *d = GlobalLock(h);
-        char     data[65536]; // TODO: De-hardcode this value.
-        int      len = WideCharToMultiByte(CP_UTF8, 0, d, -1, (char *)data, sizeof(data), NULL, 0);
+        char data[65536]; // TODO: De-hardcode this value.
+        int len = WideCharToMultiByte(CP_UTF8, 0, d, -1, data, sizeof(data), NULL, NULL);
         if (edit_active()) {
-            edit_paste(data, len, 0);
+            edit_paste(data, len, false);
         }
     }
 
@@ -401,19 +390,21 @@ NATIVE_IMAGE *utox_image_to_native(const UTOX_IMAGE data, size_t size, uint16_t 
         return NULL; // invalid image
     }
 
-    BITMAPINFO bmi = {.bmiHeader = {
-                          .biSize        = sizeof(BITMAPINFOHEADER),
-                          .biWidth       = width,
-                          .biHeight      = -height,
-                          .biPlanes      = 1,
-                          .biBitCount    = 32,
-                          .biCompression = BI_RGB,
-                      } };
+    BITMAPINFO bmi = {
+        .bmiHeader = {
+            .biSize        = sizeof(BITMAPINFOHEADER),
+            .biWidth       = width,
+            .biHeight      = -height,
+            .biPlanes      = 1,
+            .biBitCount    = 32,
+            .biCompression = BI_RGB,
+        }
+    };
 
     // create device independent bitmap, we can write the bytes to out
     // to put them in the bitmap
     uint8_t *out;
-    HBITMAP  bmp = CreateDIBSection(hdcMem, &bmi, DIB_RGB_COLORS, (void **)&out, NULL, 0);
+    HBITMAP  bmp = CreateDIBSection(main_window.mem_DC, &bmi, DIB_RGB_COLORS, (void **)&out, NULL, 0);
 
     // convert RGBA data to internal format
     // pre-applying the alpha if we're keeping the alpha channel,
@@ -467,7 +458,7 @@ void flush_file(FILE *file) {
     _commit(fd);
 }
 
-int ch_mod(uint8_t *file) {
+int ch_mod(uint8_t *UNUSED(file)) {
     /* You're probably looking for ./xlib as windows is lamesauce and wants nothing to do with sane permissions */
     return true;
 }
@@ -493,21 +484,21 @@ int file_unlock(FILE *file, uint64_t start, size_t length) {
  * accepts: char *title, title length, char *msg, msg length;
  * returns void;
  */
-void notify(char *title, uint16_t title_length, const char *msg, uint16_t msg_length, void *object, bool is_group) {
+void notify(char *title, uint16_t title_length, const char *msg, uint16_t msg_length, void *UNUSED(object), bool UNUSED(is_group)) {
     if (havefocus || self.status == 2) {
         return;
     }
 
-    FlashWindow(hwnd, 1);
+    FlashWindow(main_window.window, true);
     flashing = true;
 
     NOTIFYICONDATAW nid = {
+        .cbSize      = sizeof(nid),
+        .hWnd        = main_window.window,
         .uFlags      = NIF_ICON | NIF_INFO,
-        .hWnd        = hwnd,
         .hIcon       = unread_messages_icon,
         .uTimeout    = 5000,
         .dwInfoFlags = 0,
-        .cbSize      = sizeof(nid),
     };
 
     utf8tonative(title, nid.szInfoTitle, title_length > sizeof(nid.szInfoTitle) / sizeof(*nid.szInfoTitle) - 1 ?
@@ -520,12 +511,16 @@ void notify(char *title, uint16_t title_length, const char *msg, uint16_t msg_le
     Shell_NotifyIconW(NIM_MODIFY, &nid);
 }
 
-void showkeyboard(bool show) {} /* Added for android support. */
+void showkeyboard(bool UNUSED(show)) {} /* Added for android support. */
 
 void edit_will_deactivate(void) {}
 
 /* Redraws the main UI window */
 void redraw(void) {
+    native_window_set_target(&main_window);
+
+    SelectObject(main_window.draw_DC, main_window.draw_BM);
+
     panel_draw(&panel_root, 0, 0, settings.window_width, settings.window_height);
 }
 
@@ -535,22 +530,19 @@ void redraw(void) {
  * sets struct .cbSize, and resets the tibtab to native self.name;
  */
 void update_tray(void) {
-    uint32_t tip_length;
-    char *   tip;
-
-    /* TODO; this is likely to over/under-run FIXME! */
-
-    tip = malloc(128 * sizeof(char)); // 128 is the max length of nid.szTip
+    // FIXME: this is likely to over/under-run
+    char *tip = calloc(1, 128); // 128 is the max length of nid.szTip
     if (tip == NULL) {
-        debug("update_trip:\t Could not allocate memory.\n");
+        LOG_TRACE("update_trip", " Could not allocate memory." );
         return;
     }
 
-    snprintf(tip, 127 * sizeof(char), "%s : %s", self.name, self.statusmsg);
-    tip_length = self.name_length + 3 + self.statusmsg_length;
+    uint32_t tip_length = MIN(snprintf(tip, 127, "%s : %s", self.name, self.statusmsg), 127);
 
     NOTIFYICONDATAW nid = {
-        .uFlags = NIF_TIP, .hWnd = hwnd, .cbSize = sizeof(nid),
+        .uFlags = NIF_TIP,
+        .hWnd = main_window.window,
+        .cbSize = sizeof(nid),
     };
 
     utf8_to_nativestr((char *)tip, nid.szTip, tip_length);
@@ -564,123 +556,8 @@ void force_redraw(void) {
     redraw();
 }
 
-void desktopgrab(bool video) {
-    int x, y, w, h;
-
-    x = GetSystemMetrics(SM_XVIRTUALSCREEN);
-    y = GetSystemMetrics(SM_YVIRTUALSCREEN);
-    w = GetSystemMetrics(SM_CXVIRTUALSCREEN);
-    h = GetSystemMetrics(SM_CYVIRTUALSCREEN);
-
-    debug("result: %i %i %i %i\n", x, y, w, h);
-
-    capturewnd = CreateWindowExW(WS_EX_TOOLWINDOW | WS_EX_LAYERED, L"uToxgrab", L"Tox", WS_POPUP, x, y, w, h, NULL,
-                                 NULL, hinstance, NULL);
-    if (!capturewnd) {
-        debug("CreateWindowExW() failed\n");
-        return;
-    }
-
-    SetLayeredWindowAttributes(capturewnd, 0xFFFFFF, 128, LWA_ALPHA | LWA_COLORKEY);
-
-
-    // UpdateLayeredWindow(hwnd, NULL, NULL, NULL, NULL, NULL, 0xFFFFFF, ULW_ALPHA | ULW_COLORKEY);
-
-    ShowWindow(capturewnd, SW_SHOW);
-    SetForegroundWindow(capturewnd);
-
-    desktopgrab_video = video;
-
-    // SetCapture(hwnd);
-    // grabbing = true;
-
-    // postmessage_video(VIDEO_SET, 0, 0, (void*)1);
-}
-
-LRESULT CALLBACK GrabProc(HWND window, UINT msg, WPARAM wParam, LPARAM lParam) {
-    POINT p = {.x = GET_X_LPARAM(lParam), .y = GET_Y_LPARAM(lParam) };
-
-    ClientToScreen(window, &p);
-
-    if (msg == WM_MOUSEMOVE) {
-
-        if (grabbing) {
-            HDC dc = GetDC(window);
-            BitBlt(dc, video_grab_x, video_grab_y, video_grab_w - video_grab_x, video_grab_h - video_grab_y, dc,
-                   video_grab_x, video_grab_y, BLACKNESS);
-            video_grab_w = p.x;
-            video_grab_h = p.y;
-            BitBlt(dc, video_grab_x, video_grab_y, video_grab_w - video_grab_x, video_grab_h - video_grab_y, dc,
-                   video_grab_x, video_grab_y, WHITENESS);
-            ReleaseDC(window, dc);
-        }
-
-        return false;
-    }
-
-    if (msg == WM_LBUTTONDOWN) {
-        video_grab_x = video_grab_w = p.x;
-        video_grab_y = video_grab_h = p.y;
-        grabbing                    = true;
-        SetCapture(window);
-        return false;
-    }
-
-    if (msg == WM_LBUTTONUP) {
-        ReleaseCapture();
-        grabbing = false;
-
-        if (video_grab_x < video_grab_w) {
-            video_grab_w -= video_grab_x;
-        } else {
-            const int w  = video_grab_x - video_grab_w;
-            video_grab_x = video_grab_w;
-            video_grab_w = w;
-        }
-
-        if (video_grab_y < video_grab_h) {
-            video_grab_h -= video_grab_y;
-        } else {
-            const int w  = video_grab_y - video_grab_h;
-            video_grab_y = video_grab_h;
-            video_grab_h = w;
-        }
-
-        if (desktopgrab_video) {
-            DestroyWindow(window);
-            postmessage_utoxav(UTOXAV_SET_VIDEO_IN, 1, 0, NULL);
-        } else {
-            FRIEND *f = flist_get_selected()->data;
-            if (flist_get_selected()->item == ITEM_FRIEND && f->online) {
-                DestroyWindow(window);
-                HWND dwnd = GetDesktopWindow();
-                HDC  ddc  = GetDC(dwnd);
-                HDC  mem  = CreateCompatibleDC(ddc);
-
-                HBITMAP capture = CreateCompatibleBitmap(ddc, video_grab_w, video_grab_h);
-                SelectObject(mem, capture);
-
-                BitBlt(mem, 0, 0, video_grab_w, video_grab_h, ddc, video_grab_x, video_grab_y, SRCCOPY | CAPTUREBLT);
-                sendbitmap(mem, capture, video_grab_w, video_grab_h);
-
-                ReleaseDC(dwnd, ddc);
-                DeleteDC(mem);
-            }
-        }
-
-
-        return false;
-    }
-
-    if (msg == WM_DESTROY) {
-        grabbing = false;
-    }
-
-    return DefWindowProcW(window, msg, wParam, lParam);
-}
-
 void freefonts() {
-    for (size_t i = 0; i != countof(font); i++) {
+    for (size_t i = 0; i != COUNTOF(font); i++) {
         if (font[i]) {
             DeleteObject(font[i]);
         }
@@ -715,12 +592,12 @@ void loadfonts() {
     lf.lfUnderline = 1;
     font[FONT_MSG_LINK] = CreateFontIndirect(&lf);*/
 
+    SelectObject(main_window.draw_DC, font[FONT_TEXT]);
     TEXTMETRIC tm;
-    SelectObject(hdc, font[FONT_TEXT]);
-    GetTextMetrics(hdc, &tm);
+    GetTextMetrics(main_window.draw_DC, &tm);
     font_small_lineheight = tm.tmHeight + tm.tmExternalLeading;
-    // SelectObject(hdc, font[FONT_MSG]);
-    // GetTextMetrics(hdc, &tm);
+    // SelectObject(main_window.draw_DC, font[FONT_MSG]);
+    // GetTextMetrics(main_window.draw_DC, &tm);
     // font_msg_lineheight = tm.tmHeight + tm.tmExternalLeading;
 }
 
@@ -745,33 +622,22 @@ void config_osdefaults(UTOX_SAVE *r) {
  * Limitation: nested quotation marks are not handled
  * Credit: http://alter.org.ua/docs/win/args
  */
-PCHAR *CommandLineToArgvA(PCHAR CmdLine, int *_argc) {
-    PCHAR *argv;
-    PCHAR  _argv;
-    ULONG  len;
-    ULONG  argc;
-    CHAR   a;
-    ULONG  i, j;
+static PCHAR *CommandLineToArgvA(PCHAR CmdLine, int *_argc) {
+    ULONG len = strlen(CmdLine);
+    ULONG i = ((len + 2) / 2) * sizeof(PVOID) + sizeof(PVOID);
+    PCHAR *argv = (PCHAR *)GlobalAlloc(GMEM_FIXED, i + (len + 2) * sizeof(CHAR));
+    PCHAR _argv = (PCHAR)(((PUCHAR)argv) + i);
 
-    BOOLEAN in_QM;
-    BOOLEAN in_TEXT;
-    BOOLEAN in_SPACE;
-
-    len = strlen(CmdLine);
-    i   = ((len + 2) / 2) * sizeof(PVOID) + sizeof(PVOID);
-
-    argv = (PCHAR *)GlobalAlloc(GMEM_FIXED, i + (len + 2) * sizeof(CHAR));
-
-    _argv = (PCHAR)(((PUCHAR)argv) + i);
-
-    argc       = 0;
+    ULONG argc = 0;
     argv[argc] = _argv;
-    in_QM      = FALSE;
-    in_TEXT    = FALSE;
-    in_SPACE   = TRUE;
-    i          = 0;
-    j          = 0;
+    i = 0;
 
+    BOOLEAN in_QM    = FALSE;
+    BOOLEAN in_TEXT  = FALSE;
+    BOOLEAN in_SPACE = TRUE;
+
+    CHAR a;
+    ULONG j = 0;
     while ((a = CmdLine[i])) {
         if (in_QM) {
             if (a == '\"') {
@@ -823,6 +689,147 @@ PCHAR *CommandLineToArgvA(PCHAR CmdLine, int *_argc) {
     return argv;
 }
 
+static void tray_icon_init(HWND parent, HICON icon) {
+    NOTIFYICONDATA nid = {
+        .uFlags           = NIF_MESSAGE | NIF_ICON | NIF_TIP,
+        .uCallbackMessage = WM_NOTIFYICON,
+        .hIcon            = icon,
+        .szTip            = "uTox default tooltip",
+        .hWnd             = parent,
+        .cbSize           = sizeof(nid),
+    };
+
+    Shell_NotifyIcon(NIM_ADD, &nid);
+}
+
+static void tray_icon_decon(HWND parent) {
+    NOTIFYICONDATA nid = {
+        .hWnd   = parent,
+        .cbSize = sizeof(nid),
+    };
+
+    Shell_NotifyIcon(NIM_DELETE, &nid);
+}
+
+static void cursors_init(void) {
+    cursors[CURSOR_NONE]     = LoadCursor(NULL, IDC_ARROW);
+    cursors[CURSOR_HAND]     = LoadCursor(NULL, IDC_HAND);
+    cursors[CURSOR_TEXT]     = LoadCursor(NULL, IDC_IBEAM);
+    cursors[CURSOR_SELECT]   = LoadCursor(NULL, IDC_CROSS);
+    cursors[CURSOR_ZOOM_IN]  = LoadCursor(NULL, IDC_SIZEALL);
+    cursors[CURSOR_ZOOM_OUT] = LoadCursor(NULL, IDC_SIZEALL);
+}
+
+static bool fresh_update(void) {
+    char path[UTOX_FILE_NAME_LENGTH];
+    GetModuleFileName(NULL, path, UTOX_FILE_NAME_LENGTH);
+    LOG_WARN("Win Updater", "Starting");
+    LOG_NOTE("Win Updater", "Root %s", path);
+
+    char *name_start = strstr(path, "next_uTox.exe");
+    if (!name_start) {
+        LOG_NOTE("Win Updater", "Not the updater -- %s ", path);
+        return false;
+    }
+
+    // This is the freshly downloaded exe.
+    // make a backup of the old file
+    char backup[UTOX_FILE_NAME_LENGTH];
+    strcpy(name_start, "uTox_backup.exe");
+    memcpy(backup, path, UTOX_FILE_NAME_LENGTH);
+    LOG_NOTE("Win Updater", "Backup %s", backup);
+
+    char real[UTOX_FILE_NAME_LENGTH];
+    strcpy(name_start, "uTox.exe");
+    memcpy(real, path, UTOX_FILE_NAME_LENGTH);
+    LOG_NOTE("Win Updater", "%s", real);
+    if (MoveFileEx(real, backup, MOVEFILE_REPLACE_EXISTING) == 0) {
+        // Failed
+        LOG_ERR("Win Updater", "move failed");
+        return false;
+    }
+
+    char new[UTOX_FILE_NAME_LENGTH];
+    strcpy(name_start, "next_uTox.exe");
+    memcpy(new, path, UTOX_FILE_NAME_LENGTH);
+    LOG_NOTE("Win Updater", "%s", new);
+    if (CopyFile(new, real, 0) == 0) {
+        // Failed
+        LOG_ERR("Win Updater", "copy failed");
+        return false;
+    }
+
+    LOG_ERR("Win Updater", "Launching new path %s", real);
+
+    char cmd[UTOX_FILE_NAME_LENGTH];
+    size_t next = snprintf(cmd, UTOX_FILE_NAME_LENGTH, " --skip-updater --delete-updater %s", new);
+    if (settings.portable_mode) {
+        snprintf(cmd + next, UTOX_FILE_NAME_LENGTH - next, " -p");
+    }
+    ShellExecute(NULL, "open", real, cmd, NULL, SW_SHOW);
+    DeleteFile(new);
+    return true;
+}
+
+static bool pending_update(void) {
+    LOG_WARN("Win Pending", "Starting");
+    // Check if we're the fresh version.
+    char path[UTOX_FILE_NAME_LENGTH];
+    GetModuleFileName(NULL, path, UTOX_FILE_NAME_LENGTH);
+
+    // TODO: The updater should work with the binaries we're distributing.
+    // uTox_win64.exe, uTox_win32.exe, uTox_winXP.exe on utox.io, maybe (probably) others on jenkins.
+    char *name_start = strstr(path, "uTox.exe");
+    if (!name_start) {
+        // Try lowercase too
+        name_start = strstr(path, "utox.exe");
+    }
+
+    if (name_start) {
+        char next[UTOX_FILE_NAME_LENGTH];
+        strcpy(name_start, "next_uTox.exe");
+        memcpy(next, path, UTOX_FILE_NAME_LENGTH);
+        FILE *f = fopen(next, "rb");
+        if (f) {
+            LOG_ERR("Win Pending", "Updater waiting :D");
+            fclose(f);
+            char cmd[UTOX_FILE_NAME_LENGTH] = { 0 };
+            if (settings.portable_mode) {
+                snprintf(cmd, UTOX_FILE_NAME_LENGTH, " -p");
+            }
+            ShellExecute(NULL, "open", next, cmd, NULL, SW_SHOW);
+            return true;
+        }
+        LOG_WARN("Win Pending", "No updater waiting for us");
+    }
+    LOG_WARN("Win Pending", "Bad file name -- %s ", path);
+
+    return false;
+}
+
+static bool win_init_mutex(HANDLE *mutex, HINSTANCE hInstance, PSTR cmd) {
+    *mutex = CreateMutex(NULL, 0, TITLE);
+
+    if (!mutex) {
+        LOG_FATAL_ERR(-4, "Win Mutex", "Unable to create windows mutex.");
+    }
+
+    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        HWND window = FindWindow(TITLE, NULL);
+        if (window) {
+            COPYDATASTRUCT data = {
+                .cbData = strlen(cmd),
+                .lpData = cmd
+            };
+            SendMessage(window, WM_COPYDATA, (WPARAM)hInstance, (LPARAM)&data);
+            LOG_FATAL_ERR(-3, "Win Mutex", "Message sent.");
+        }
+        LOG_FATAL_ERR(-3, "Win Mutex", "Error getting mutex or window.");
+    }
+
+    return true;
+}
+
 /** client main()
  *
  * Main thread
@@ -831,53 +838,63 @@ PCHAR *CommandLineToArgvA(PCHAR CmdLine, int *_argc) {
  *
  * also handles call from other apps.
  */
-int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR cmd, int nCmdShow) {
-
+int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE UNUSED(hPrevInstance), PSTR cmd, int nCmdShow) {
     pthread_mutex_init(&messages_lock, NULL);
 
-    /* if opened with argument, check if uTox is already open and pass the argument to the existing process */
-    HANDLE utox_mutex = CreateMutex(NULL, 0, TITLE);
-
-    if (!utox_mutex) {
-        return false;
-    }
-    if (GetLastError() == ERROR_ALREADY_EXISTS) {
-        HWND window = FindWindow(TITLE, NULL);
-        if (window) {
-            COPYDATASTRUCT data = {.cbData = strlen(cmd), .lpData = cmd };
-            SendMessage(window, WM_COPYDATA, (WPARAM)hInstance, (LPARAM)&data);
-        }
-        return false;
+    int argc;
+    PCHAR *argv = CommandLineToArgvA(GetCommandLineA(), &argc);
+    if (!argv) {
+        printf("Init error -- CommandLineToArgvA failed.");
+        return -5;
     }
 
-    /* Process argc/v the backwards (read: windows) way. */
-    PCHAR *argv;
-    int    argc;
-    argv = CommandLineToArgvA(GetCommandLineA(), &argc);
-
-    if (NULL == argv) {
-        debug("CommandLineToArgvA failed\n");
-        return true;
-    }
-
-    bool   theme_was_set_on_argv;
-    int8_t should_launch_at_startup;
-    int8_t set_show_window;
-    bool   no_updater;
-
-    parse_args(argc, argv, &theme_was_set_on_argv, &should_launch_at_startup, &set_show_window, &no_updater);
+    int8_t should_launch_at_startup, set_show_window;
+    bool   skip_updater;
+    parse_args(argc, argv, &skip_updater, &should_launch_at_startup, &set_show_window);
+    GlobalFree(argv);
 
     if (settings.portable_mode == true) {
         /* force the working directory if opened with portable command */
-        HMODULE      hModule = GetModuleHandle(NULL);
-        char         path[MAX_PATH];
-        int          len = GetModuleFileName(hModule, path, MAX_PATH);
+        const HMODULE hModule = GetModuleHandle(NULL);
+        char          path[MAX_PATH];
+        const int     len = GetModuleFileName(hModule, path, MAX_PATH);
         unsigned int i;
-        for (i = (len - 1); path[i] != '\\'; --i)
-            ;
-        path[i] = 0; //!
+        for (i = len - 1; path[i] != '\\'; --i) {
+            // Do nothing until we reach the folder separator.
+        }
+        path[i] = 0;
         SetCurrentDirectory(path);
-        strcpy(portable_mode_save_path, (char *)path);
+        strcpy(portable_mode_save_path, path);
+    }
+
+    // We call utox_init after parse_args()
+    utox_init();
+
+    #ifdef __WIN_LEGACY
+        LOG_WARN("WinMain", "Legacy windows build");
+    #else
+        LOG_WARN("WinMain", "Normal windows build");
+    #endif
+
+    #ifdef GIT_VERSION
+        LOG_NOTE("WinMain", "uTox version %s \n", GIT_VERSION);
+    #endif
+
+    /* if opened with argument, check if uTox is already open and pass the argument to the existing process */
+    HANDLE utox_mutex;
+    win_init_mutex(&utox_mutex, hInstance, cmd);
+
+    if (!skip_updater) {
+        LOG_NOTE("WinMain", "Not skipping updater");
+        if (fresh_update()) {
+            CloseHandle(utox_mutex);
+            exit(0);
+        }
+
+        if (pending_update()) {
+            CloseHandle(utox_mutex);
+            exit(0);
+        }
     }
 
     if (should_launch_at_startup == 1) {
@@ -886,154 +903,56 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR cmd, int n
         launch_at_startup(0);
     }
 
-#ifdef UPDATER_BUILD
-#define UTOX_EXE "\\uTox.exe"
-#define UTOX_UPDATER_EXE "\\utox_runner.exe"
-#define UTOX_VERSION_FILE "\\version"
+    cursors_init();
 
-    if (!no_updater) {
+    native_window_init(hInstance); // Needed to generate the Windows window class we use.
 
-        char path[MAX_PATH + 20];
-        int  len = GetModuleFileName(NULL, path, MAX_PATH);
-
-        /* Is the uTox exe named like the updater one. */
-        if (len > sizeof(UTOX_EXE) && memcmp(path + (len - (sizeof(UTOX_EXE) - 1)), UTOX_EXE, sizeof(UTOX_EXE)) == 0) {
-            memcpy(path + (len - (sizeof(UTOX_EXE) - 1)), UTOX_VERSION_FILE, sizeof(UTOX_VERSION_FILE));
-            FILE *fp = fopen(path, "rb");
-            if (fp) {
-                fclose(fp);
-                /* Updater is here. */
-                memcpy(path + (len - (sizeof(UTOX_EXE) - 1)), UTOX_UPDATER_EXE, sizeof(UTOX_UPDATER_EXE));
-                FILE *fp = fopen(path, "rb");
-                if (fp) {
-                    fclose(fp);
-                    CloseHandle(utox_mutex);
-                    /* This is an updater build not being run by the updater. Run the updater and exit. */
-                    ShellExecute(NULL, "open", path, cmd, NULL, SW_SHOW);
-                    return false;
-                }
-            }
-        }
-    }
-#endif
-
-#ifdef __WIN_LEGACY
-    debug("Legacy windows build\n");
-#else
-    debug("Normal windows build\n");
-#endif
-
-    // Free memory allocated by CommandLineToArgvA
-    GlobalFree(argv);
-
-#ifdef GIT_VERSION
-    debug_notice("uTox version %s \n", GIT_VERSION);
-#endif
-
-    /* */
-    MSG msg;
-    // int x, y;
-    wchar_t classname[] = L"uTox", popupclassname[] = L"uToxgrab";
-
-    my_icon              = LoadIcon(hInstance, MAKEINTRESOURCE(101));
-    unread_messages_icon = LoadIcon(hInstance, MAKEINTRESOURCE(102));
-
-    cursors[CURSOR_NONE]     = LoadCursor(NULL, IDC_ARROW);
-    cursors[CURSOR_HAND]     = LoadCursor(NULL, IDC_HAND);
-    cursors[CURSOR_TEXT]     = LoadCursor(NULL, IDC_IBEAM);
-    cursors[CURSOR_SELECT]   = LoadCursor(NULL, IDC_CROSS);
-    cursors[CURSOR_ZOOM_IN]  = LoadCursor(NULL, IDC_SIZEALL);
-    cursors[CURSOR_ZOOM_OUT] = LoadCursor(NULL, IDC_SIZEALL);
-
-    hinstance = hInstance;
-
-    WNDCLASSW wc =
-                  {
-                    .style         = CS_OWNDC | CS_DBLCLKS,
-                    .lpfnWndProc   = WindowProc,
-                    .hInstance     = hInstance,
-                    .hIcon         = my_icon,
-                    .lpszClassName = classname,
-                  },
-
-              wc2 = {
-                  .lpfnWndProc   = GrabProc,
-                  .hInstance     = hInstance,
-                  .hIcon         = my_icon,
-                  .lpszClassName = popupclassname,
-                  .hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH),
-              };
-
-    NOTIFYICONDATA nid = {
-        .uFlags           = NIF_MESSAGE | NIF_ICON | NIF_TIP,
-        .uCallbackMessage = WM_NOTIFYICON,
-        .hIcon            = my_icon,
-        .szTip            = "uTox default tooltip",
-        .cbSize           = sizeof(nid),
-    };
+    screen_grab_init(hInstance);
 
     OleInitialize(NULL);
-    RegisterClassW(&wc);
-    RegisterClassW(&wc2);
-
 
     uint16_t langid = GetUserDefaultUILanguage() & 0xFFFF;
-    LANG            = ui_guess_lang_by_windows_lang_id(langid, DEFAULT_LANG);
+
+    LANG = ui_guess_lang_by_windows_lang_id(langid, DEFAULT_LANG);
 
     dropdown_language.selected = dropdown_language.over = LANG;
 
-    UTOX_SAVE *save = config_load();
-
-    if (!theme_was_set_on_argv) {
-        dropdown_theme.selected = save->theme;
-        settings.theme          = save->theme;
-    }
     theme_load(settings.theme);
 
-    utox_init();
-
-    save->window_width  = save->window_width < SCALE(MAIN_WIDTH) ? SCALE(MAIN_WIDTH) : save->window_width;
-    save->window_height = save->window_height < SCALE(MAIN_HEIGHT) ? SCALE(MAIN_HEIGHT) : save->window_height;
+    settings.window_width  = MAX((uint32_t)SCALE(MAIN_WIDTH), settings.window_width);
+    settings.window_height = MAX((uint32_t)SCALE(MAIN_HEIGHT), settings.window_height);
 
     char pretitle[128];
     snprintf(pretitle, 128, "%s %s (version : %s)", TITLE, SUB_TITLE, VERSION);
     size_t  title_size = strlen(pretitle) + 1;
     wchar_t title[title_size];
     mbstowcs(title, pretitle, title_size);
-    /* trim first letter that appears for god knows why */
-    /* needed if/when the uTox becomes a muTox */
-    // wmemmove(title, title+1, wcslen(title));
 
-    hwnd = CreateWindowExW(0, classname, title, WS_OVERLAPPEDWINDOW, save->window_x, save->window_y, save->window_width,
-                           save->window_height, NULL, NULL, hInstance, NULL);
+    native_window_create_main(settings.window_x, settings.window_y, settings.window_width, settings.window_height);
 
+    native_notify_init(hInstance);
 
     hdc_brush = GetStockObject(DC_BRUSH);
 
+    tray_icon_init(main_window.window, LoadIcon(hInstance, MAKEINTRESOURCE(101)));
 
-    tme.hwndTrack = hwnd;
+    SetBkMode(main_window.draw_DC, TRANSPARENT);
 
-    nid.hWnd = hwnd;
-    Shell_NotifyIcon(NIM_ADD, &nid);
+    dnd_init(main_window.window);
 
-    SetBkMode(hdc, TRANSPARENT);
-
-    dnd_init(hwnd);
-
-    // start tox thread (hwnd needs to be set first)
+    // start tox thread (main_window.window needs to be set first)
     thread(toxcore_thread, NULL);
 
     // wait for tox_thread init
-    while (!tox_thread_init && !settings.use_encryption) {
+    while (!tox_thread_init && !settings.save_encryption) {
         yieldcpu(1);
     }
 
     if (*cmd) {
-        int len = strlen(cmd);
+        const int len = strlen(cmd);
         do_tox_url((uint8_t *)cmd, len);
     }
 
-    draw = true;
     redraw();
     update_tray();
 
@@ -1047,12 +966,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR cmd, int n
     }
 
     if (settings.start_in_tray) {
-        ShowWindow(hwnd, SW_HIDE);
+        ShowWindow(main_window.window, SW_HIDE);
         hidden = true;
     } else {
-        ShowWindow(hwnd, nCmdShow);
+        ShowWindow(main_window.window, nCmdShow);
     }
 
+    MSG msg;
     while (GetMessage(&msg, NULL, 0, 0)) {
         TranslateMessage(&msg);
         DispatchMessage(&msg);
@@ -1064,8 +984,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR cmd, int n
 
     /* cleanup */
 
-    /* delete tray icon */
-    Shell_NotifyIcon(NIM_DELETE, &nid);
+    tray_icon_decon(main_window.window);
 
     // wait for tox_thread to exit
     while (tox_thread_init) {
@@ -1073,7 +992,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR cmd, int n
     }
 
     RECT wndrect = { 0 };
-    GetWindowRect(hwnd, &wndrect);
+    GetWindowRect(main_window.window, &wndrect);
     UTOX_SAVE d = {
         .window_x      = wndrect.left < 0 ? 0 : wndrect.left,
         .window_y      = wndrect.top < 0 ? 0 : wndrect.top,
@@ -1082,405 +1001,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PSTR cmd, int n
     };
     config_save(&d);
 
-    debug_info("uTox:\tClean exit.\n");
-
-    return false;
-}
-
-/** Handles all callback requests from winmain();
- *
- * handles the window functions internally, and ships off the tox calls to tox
- */
-LRESULT CALLBACK WindowProc(HWND hwn, UINT msg, WPARAM wParam, LPARAM lParam) {
-    static int mx, my;
-
-    if (hwnd && hwn != hwnd) {
-        if (msg == WM_DESTROY) {
-            if (hwn == video_hwnd[0]) {
-                if (settings.video_preview) {
-                    settings.video_preview = false;
-                    postmessage_utoxav(UTOXAV_STOP_VIDEO, 0, 0, NULL);
-                }
-
-                return false;
-            }
-
-            int i;
-            for (i = 0; i != countof(friend); i++) {
-                if (video_hwnd[i + 1] == hwn) {
-                    FRIEND *f = &friend[i];
-                    postmessage_utoxav(UTOXAV_STOP_VIDEO, f->number, 0, NULL);
-                    break;
-                }
-            }
-            if (i == countof(friend)) {
-                debug("this should not happen\n");
-            }
-        }
-
-        return DefWindowProcW(hwn, msg, wParam, lParam);
-    }
-
-    switch (msg) {
-        case WM_QUIT:
-        case WM_CLOSE:
-        case WM_DESTROY: {
-            if (settings.close_to_tray) {
-                debug("Closing to tray.\n");
-                togglehide(0);
-                return true;
-            } else {
-                PostQuitMessage(0);
-                return false;
-            }
-        }
-
-        case WM_GETMINMAXINFO: {
-            POINT min = { SCALE(MAIN_WIDTH), SCALE(MAIN_HEIGHT) };
-            ((MINMAXINFO *)lParam)->ptMinTrackSize = min;
-
-            break;
-        }
-
-        case WM_CREATE: {
-            main_hdc = GetDC(hwn);
-            hdc      = CreateCompatibleDC(main_hdc);
-            hdcMem   = CreateCompatibleDC(hdc);
-
-            return false;
-        }
-
-        case WM_SIZE: {
-            switch (wParam) {
-                case SIZE_MAXIMIZED: {
-                    settings.window_maximized = true;
-                    break;
-                }
-
-                case SIZE_RESTORED: {
-                    settings.window_maximized = false;
-                    break;
-                }
-            }
-
-            int w, h;
-
-            w = GET_X_LPARAM(lParam);
-            h = GET_Y_LPARAM(lParam);
-
-            if (w != 0) {
-                RECT r;
-                GetClientRect(hwn, &r);
-                w = r.right;
-                h = r.bottom;
-
-                settings.window_width  = w;
-                settings.window_height = h;
-
-                ui_set_scale(dropdown_dpi.selected + 6);
-                ui_size(w, h);
-
-                if (hdc_bm) {
-                    DeleteObject(hdc_bm);
-                }
-
-                hdc_bm = CreateCompatibleBitmap(main_hdc, settings.window_width, settings.window_height);
-                SelectObject(hdc, hdc_bm);
-                redraw();
-            }
-            break;
-        }
-
-        case WM_SETFOCUS: {
-            if (flashing) {
-                FlashWindow(hwnd, 0);
-                flashing = false;
-
-                NOTIFYICONDATAW nid = {
-                    .uFlags = NIF_ICON, .hWnd = hwnd, .hIcon = my_icon, .cbSize = sizeof(nid),
-                };
-
-                Shell_NotifyIconW(NIM_MODIFY, &nid);
-            }
-
-            havefocus = true;
-            break;
-        }
-
-        case WM_KILLFOCUS: {
-            havefocus = false;
-            break;
-        }
-
-        case WM_ERASEBKGND: {
-            return true;
-        }
-
-        case WM_PAINT: {
-            PAINTSTRUCT ps;
-
-            BeginPaint(hwn, &ps);
-
-            RECT r = ps.rcPaint;
-            BitBlt(main_hdc, r.left, r.top, r.right - r.left, r.bottom - r.top, hdc, r.left, r.top, SRCCOPY);
-
-            EndPaint(hwn, &ps);
-            return false;
-        }
-
-        case WM_SYSKEYDOWN: // called instead of WM_KEYDOWN when ALT is down or F10 is pressed
-        case WM_KEYDOWN: {
-            bool control = ((GetKeyState(VK_CONTROL) & 0x80) != 0);
-            bool shift   = ((GetKeyState(VK_SHIFT) & 0x80) != 0);
-            bool alt     = ((GetKeyState(VK_MENU) & 0x80) != 0); /* Be careful not to clobber alt+num symbols */
-
-            if (wParam >= VK_NUMPAD0 && wParam <= VK_NUMPAD9) {
-                // normalize keypad and non-keypad numbers
-                wParam = wParam - VK_NUMPAD0 + '0';
-            }
-
-            if (control && wParam == 'C') {
-                copy(1);
-                return false;
-            }
-
-            if (control) {
-                if ((wParam == VK_TAB && shift) || wParam == VK_PRIOR) {
-                    flist_previous_tab();
-                    redraw();
-                    return false;
-                } else if (wParam == VK_TAB || wParam == VK_NEXT) {
-                    flist_next_tab();
-                    redraw();
-                    return false;
-                }
-            }
-
-            if (control && !alt) {
-                if (wParam >= '1' && wParam <= '9') {
-                    flist_selectchat(wParam - '1');
-                    redraw();
-                    return false;
-                } else if (wParam == '0') {
-                    flist_selectchat(9);
-                    redraw();
-                    return false;
-                }
-            }
-
-            if (edit_active()) {
-                if (control) {
-                    switch (wParam) {
-                        case 'V': paste(); return false;
-                        case 'X':
-                            copy(0);
-                            edit_char(KEY_DEL, 1, 0);
-                            return false;
-                    }
-                }
-
-                if (control || ((wParam < 'A' || wParam > 'Z') && wParam != VK_RETURN && wParam != VK_BACK)) {
-                    edit_char(wParam, 1, (control << 2) | shift);
-                }
-            } else {
-                messages_char(wParam);
-                break;
-            }
-
-            break;
-        }
-
-        case WM_CHAR: {
-            if (edit_active()) {
-                if (wParam == KEY_RETURN && (GetKeyState(VK_SHIFT) & 0x80)) {
-                    wParam = '\n';
-                }
-                if (wParam != KEY_TAB) {
-                    edit_char(wParam, 0, 0);
-                }
-                return false;
-            }
-
-            return false;
-        }
-
-        case WM_MOUSEWHEEL: {
-            double delta = (double)GET_WHEEL_DELTA_WPARAM(wParam);
-            mx           = GET_X_LPARAM(lParam);
-            my           = GET_Y_LPARAM(lParam);
-
-            panel_mwheel(&panel_root, mx, my, settings.window_width, settings.window_height,
-                         delta / (double)(WHEEL_DELTA), 1);
-            return false;
-        }
-
-        case WM_MOUSEMOVE: {
-            int x, y, dx, dy;
-
-            x = GET_X_LPARAM(lParam);
-            y = GET_Y_LPARAM(lParam);
-
-            dx = x - mx;
-            dy = y - my;
-            mx = x;
-            my = y;
-
-            cursor = 0;
-            panel_mmove(&panel_root, 0, 0, settings.window_width, settings.window_height, x, y, dx, dy);
-
-            SetCursor(cursors[cursor]);
-
-            if (!mouse_tracked) {
-                TrackMouseEvent(&tme);
-                mouse_tracked = true;
-            }
-
-            return false;
-        }
-
-        case WM_LBUTTONDOWN:
-        case WM_LBUTTONDBLCLK: {
-            int x, y;
-
-            x = GET_X_LPARAM(lParam);
-            y = GET_Y_LPARAM(lParam);
-
-            if (x != mx || y != my) {
-                panel_mmove(&panel_root, 0, 0, settings.window_width, settings.window_height, x, y, x - mx, y - my);
-                mx = x;
-                my = y;
-            }
-
-            // double redraw>
-            panel_mdown(&panel_root);
-            if (msg == WM_LBUTTONDBLCLK) {
-                panel_dclick(&panel_root, 0);
-            }
-
-            SetCapture(hwn);
-            mdown = true;
-            break;
-        }
-
-        case WM_RBUTTONDOWN: {
-            panel_mright(&panel_root);
-            break;
-        }
-
-        case WM_RBUTTONUP: {
-            break;
-        }
-
-        case WM_LBUTTONUP: {
-            ReleaseCapture();
-            break;
-        }
-
-        case WM_CAPTURECHANGED: {
-            if (mdown) {
-                panel_mup(&panel_root);
-                mdown = false;
-            }
-
-            break;
-        }
-
-        case WM_MOUSELEAVE: {
-            ui_mouseleave();
-            mouse_tracked = false;
-            break;
-        }
-
-
-        case WM_COMMAND: {
-            int menu = LOWORD(wParam); //, msg = HIWORD(wParam);
-
-            switch (menu) {
-                case TRAY_SHOWHIDE: {
-                    togglehide(0);
-                    break;
-                }
-
-                case TRAY_EXIT: {
-                    PostQuitMessage(0);
-                    break;
-                }
-
-#define setstatus(x)                                         \
-    if (self.status != x) {                                  \
-        postmessage_toxcore(TOX_SELF_SET_STATE, x, 0, NULL); \
-        self.status = x;                                     \
-        redraw();                                            \
-    }
-
-                case TRAY_STATUS_AVAILABLE: {
-                    setstatus(TOX_USER_STATUS_NONE);
-                    break;
-                }
-
-                case TRAY_STATUS_AWAY: {
-                    setstatus(TOX_USER_STATUS_AWAY);
-                    break;
-                }
-
-                case TRAY_STATUS_BUSY: {
-                    setstatus(TOX_USER_STATUS_BUSY);
-                    break;
-                }
-            }
-
-            break;
-        }
-
-        case WM_NOTIFYICON: {
-            int message = LOWORD(lParam);
-
-            switch (message) {
-                case WM_MOUSEMOVE: {
-                    break;
-                }
-
-                case WM_LBUTTONDOWN: {
-                    togglehide(0);
-                    break;
-                }
-                case WM_LBUTTONDBLCLK: {
-                    togglehide(1);
-                    break;
-                }
-
-                case WM_LBUTTONUP: {
-                    break;
-                }
-
-                case WM_RBUTTONDOWN: {
-                    break;
-                }
-
-                case WM_RBUTTONUP:
-                case WM_CONTEXTMENU: {
-                    ShowContextMenu();
-                    break;
-                }
-            }
-            return false;
-        }
-
-        case WM_COPYDATA: {
-            togglehide(1);
-            SetForegroundWindow(hwn);
-            COPYDATASTRUCT *data = (void *)lParam;
-            if (data->lpData) {
-                do_tox_url(data->lpData, data->cbData);
-            }
-            return false;
-        }
-
-        case WM_TOX ... WM_TOX + 128: {
-            utox_message_dispatch(msg - WM_TOX, wParam >> 16, wParam, (void *)lParam);
-            return false;
-        }
-    }
-
-    return DefWindowProcW(hwn, msg, wParam, lParam);
+    // TODO: This should be a non-zero value determined by a message's wParam.
+    return 0;
 }

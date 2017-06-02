@@ -16,6 +16,7 @@
 #include "native/time.h"
 
 #include <string.h>
+#include <sys/stat.h>
 
 #define MAX_INCOMING_COUNT 32
 
@@ -188,17 +189,27 @@ static bool resumeable_name(FILE_TRANSFER *ft, char *name) {
 }
 
 static bool ft_update_resumable(FILE_TRANSFER *ft) {
-    if (ft->resume_file) {
-        fseeko(ft->resume_file, SEEK_SET, 0);
-        if (fwrite(ft, sizeof(FILE_TRANSFER), 1, ft->resume_file) == 1) {
-            fflush(ft->resume_file);
-            return true;
-        }
+    if (!ft->resume_file) {
+        LOG_ERR("FileTransfer", "Unable to save filetransfer info. Got NULL file pointer.");
+        return false;
     }
 
-    LOG_ERR("FileTransfer", "Unable to save file info... uTox can't resume file %.*s",
-                (int)ft->name_length, ft->name);
-    return false;
+    // This file pointer has a tendency of being both invalid and non-null so we use fstat to check it.
+    struct stat buffer;
+    if (fstat(fileno(ft->resume_file), &buffer) != 0) {
+        LOG_ERR("FileTransfer", "Unable to save file info. Invalid filepointer.");
+        return false;
+    }
+
+    fseeko(ft->resume_file, SEEK_SET, 0);
+    if (fwrite(ft, sizeof(FILE_TRANSFER), 1, ft->resume_file) != 1) {
+        LOG_ERR("FileTransfer", "Unable to save file info... uTox can't resume file %.*s",
+                ft->name_length, ft->name);
+        return false;
+    }
+
+    fflush(ft->resume_file);
+    return true;
 }
 
 /* Create the file transfer resume info file. */
@@ -1279,6 +1290,10 @@ static void outgoing_file_callback_chunk(Tox *tox, uint32_t friend_number, uint3
             friend_number, file_number, position, length);
 
     FILE_TRANSFER *ft = get_file_transfer(friend_number, file_number);
+    if (!ft) {
+        LOG_ERR("FileTransfer", "Unabele to get file transfer (%u & %u)", friend_number, file_number);
+        return;
+    }
 
     if (length == 0) {
         LOG_NOTE("FileTransfer", "Outgoing transfer is done (%u & %u)", friend_number, file_number);

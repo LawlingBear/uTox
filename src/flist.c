@@ -94,7 +94,7 @@ static void flist_draw_name(ITEM *i, int x, int y, int width, char *name, char *
     setcolor(color);
     setfont(FONT_LIST_NAME);
     /* Always draw name*/
-    drawtextwidth(x, width, y, name, name_length);
+    drawtextrange(x, width - SCALE(SIDEBAR_PADDING * 5), y, name, name_length);
 
     if (!settings.use_mini_flist) {
         /* Name + user status msg*/
@@ -103,7 +103,7 @@ static void flist_draw_name(ITEM *i, int x, int y, int width, char *name, char *
         }
         setcolor(color);
         setfont(FONT_STATUS);
-        drawtextwidth(x, width - SCALE(SIDEBAR_PADDING * 12), y + SCALE(16), msg, msg_length);
+        drawtextrange(x, width - SCALE(SIDEBAR_PADDING * 5), y + SCALE(16), msg, msg_length);
     }
 }
 
@@ -136,18 +136,18 @@ static void drawitem(ITEM *i, int x, int y, int width) {
 
     if (settings.use_mini_flist) {
         box_height      = SCALE(ROSTER_BOX_HEIGHT / 2);
-        avatar_x        = SCALE(x + SCROLL_WIDTH);
+        avatar_x        = x + SCALE(SCROLL_WIDTH);
         avatar_y        = y + SCALE(ROSTER_AVATAR_TOP / 2);
-        name_x          = SCALE(avatar_x + BM_CONTACT_WIDTH / 2);
+        name_x          = avatar_x + BM_CONTACT_WIDTH / 2 + SCALE(5);
         name_y          = y + SCALE(ROSTER_NAME_TOP / 2);
         default_w       = BM_CONTACT_WIDTH / 2;
         group_bitmap    = BM_GROUP_MINI;
         contact_bitmap  = BM_CONTACT_MINI;
     } else {
         box_height      = SCALE(ROSTER_BOX_HEIGHT);
-        avatar_x        = SCALE(x + SCROLL_WIDTH);
+        avatar_x        = x + SCALE(SCROLL_WIDTH);
         avatar_y        = y + SCALE(ROSTER_AVATAR_TOP);
-        name_x          = SCALE(avatar_x + BM_CONTACT_WIDTH);
+        name_x          = avatar_x + BM_CONTACT_WIDTH + SCALE(5);
         name_y          = y + SCALE(ROSTER_NAME_TOP);
         default_w       = BM_CONTACT_WIDTH;
         group_bitmap    = BM_GROUP;
@@ -234,7 +234,7 @@ static void drawitem(ITEM *i, int x, int y, int width) {
 }
 
 // find index of given item in shown_list, or INT_MAX if it can't be found
-static int find_item_shown_index(ITEM *it) {
+static unsigned int find_item_shown_index(ITEM *it) {
     for (unsigned int i = 0; i < showncount; ++i) {
         if (shown_list[i] == it - item) { // (it - item) returns the index of the item in the full items list
             return i;
@@ -331,7 +331,7 @@ static void change_tab(int offset) {
      * so I commented it incase it breaks stuff...  */
     // if (selected_item->item == ITEM_FRIEND ||
     // selected_item->item == ITEM_GROUP) {
-    int index = find_item_shown_index(selected_item);
+    unsigned int index = find_item_shown_index(selected_item);
     if (index != INT_MAX) {
         // flist_selectchat will check if out of bounds
         flist_selectchat((index + offset + showncount) % showncount);
@@ -393,27 +393,29 @@ static void page_close(ITEM *i) {
 
         case ITEM_GROUP: {
             GROUPCHAT *g = get_group(selected_item->id_number);
+            if (g) {
+                current_width = g->msg.width;
 
-            current_width = g->msg.width;
+                free(g->typed);
+                g->typed_length = edit_chat_msg_group.length;
+                g->typed = calloc(1, g->typed_length);
+                if (!g->typed) {
+                    LOG_ERR("F-List", "Unable to calloc for g->typed.");
+                    return;
+                }
 
-            free(g->typed);
-            g->typed_length = edit_chat_msg_group.length;
-            g->typed = calloc(1, g->typed_length);
-            if (!g->typed) {
-                LOG_ERR("flist", "Unable to calloc for g->typed.");
-                return;
+                memcpy(g->typed, edit_chat_msg_group.data, g->typed_length);
+
+                g->msg.scroll = messages_group.content_scroll->d;
+
+                g->edit_history        = edit_chat_msg_group.history;
+                g->edit_history_cur    = edit_chat_msg_group.history_cur;
+                g->edit_history_length = edit_chat_msg_group.history_length;
             }
-
-            memcpy(g->typed, edit_chat_msg_group.data, g->typed_length);
-
-            g->msg.scroll = messages_group.content_scroll->d;
-
-            g->edit_history        = edit_chat_msg_group.history;
-            g->edit_history_cur    = edit_chat_msg_group.history_cur;
-            g->edit_history_length = edit_chat_msg_group.history_length;
 
             panel_chat.disabled  = true;
             panel_group.disabled = true;
+
             break;
         }
 
@@ -504,6 +506,9 @@ static void page_open(ITEM *i) {
 
         case ITEM_GROUP: {
             GROUPCHAT *g = get_group(i->id_number);
+            if (!g) {
+                LOG_FATAL_ERR(EXIT_FAILURE, "F-List", "Selected group no longer exists. Group number: %u", i->id_number);
+            }
 
             memcpy(edit_chat_msg_group.data, g->typed, g->typed_length);
             edit_chat_msg_group.length = g->typed_length;
@@ -950,12 +955,12 @@ bool flist_mmove(void *UNUSED(n), int UNUSED(x), int UNUSED(y), int UNUSED(width
             } else {
                 d = (selected_item_dy - real_height / 2) / real_height;
             }
-            int index = find_item_shown_index(selected_item);
+            unsigned int index = find_item_shown_index(selected_item);
             if (index != INT_MAX) { // selected_item was found in shown list
                 index += d;         // get item being dragged over
 
                 // set item being dragged over
-                if (index >= 0 && ((uint32_t)index) < itemcount) {
+                if (index < itemcount) {
                     nitem = &item[shown_list[index]];
                 }
             }

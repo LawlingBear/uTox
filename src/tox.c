@@ -150,6 +150,7 @@ static void set_callbacks(Tox *tox) {
 
 void tox_after_load(Tox *tox) {
     utox_friend_list_init(tox);
+    init_groups();
 
     #ifdef ENABLE_MULTIDEVICE
     // self.group_list_count = tox_self_get_(tox);
@@ -294,7 +295,7 @@ static int load_toxcore_save(struct Tox_Options *options) {
                 return 0;
             }
         } else {
-            LOG_INFO("Toxcore", "Using unencrypted save file; this could be insecure!");
+            LOG_INFO("Toxcore", "Using unencrypted save file");
             options->savedata_type   = TOX_SAVEDATA_TYPE_TOX_SAVE;
             options->savedata_data   = raw_data;
             options->savedata_length = raw_length;
@@ -441,7 +442,6 @@ static int init_toxcore(Tox **tox) {
  * Accepts and returns nothing.
  */
 void toxcore_thread(void *UNUSED(args)) {
-    Tox *  tox              = NULL;
     ToxAV *av               = NULL;
     bool   reconfig         = 1;
     int    toxcore_init_err = 0;
@@ -449,6 +449,7 @@ void toxcore_thread(void *UNUSED(args)) {
     while (reconfig) {
         reconfig = 0;
 
+        Tox *tox = NULL;
         toxcore_init_err = init_toxcore(&tox);
         if (toxcore_init_err == -2) {
             // fatal failure, unable to create tox instance
@@ -580,6 +581,7 @@ void toxcore_thread(void *UNUSED(args)) {
 
     tox_thread_init = UTOX_TOX_THREAD_INIT_NONE;
     free_friends();
+    raze_groups();
     LOG_TRACE("Toxcore", "Tox thread:\tClean exit!");
 }
 
@@ -1043,12 +1045,11 @@ static void tox_thread_message(Tox *tox, ToxAV *av, uint64_t time, uint8_t msg, 
             }
 
             if (g_num != -1) {
-                GROUPCHAT *g = get_group(g_num);
-                if (!g) {
-                    return;
+                if (group_create(g_num, param2)) {
+                    postmessage_utox(GROUP_ADD, g_num, param2, NULL);
+                } else {
+                    LOG_ERR("Tox", "Failed creating group %u", g_num);
                 }
-                group_init(g, g_num, param2);
-                postmessage_utox(GROUP_ADD, g_num, param2, NULL);
             }
             save_needed = true;
             break;
